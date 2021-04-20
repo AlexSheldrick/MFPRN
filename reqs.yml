@@ -1,0 +1,15 @@
+name: GR
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - trimesh
+  - cudatoolkit
+  - tensorboard
+  - numpy
+  - pip:
+    - pymcubes
+    - pytorch-lightning
+    - torch
+    - torchvision
