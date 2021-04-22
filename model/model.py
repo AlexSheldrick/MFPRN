@@ -35,9 +35,9 @@ class Network(nn.Module):
         self.actvn = nn.ReLU()
         #self.actvn_out = nn.Sigmoid()
 
-    def forward(self, x, points):
+    def forward(self, batch):
 
-        features = self.feature_extractor(x, points)
+        features = self.feature_extractor(batch)
         shape = features.shape
 
         features = torch.reshape(features,(shape[0], shape[1], shape[3]))
@@ -54,10 +54,8 @@ class Network(nn.Module):
 
 class SimpleImplicitScene(nn.Module):
 
-    def __init__(self, coord_embedding=256, hidden_dim=256):
+    def __init__(self, coord_embedding=256, hidden_dim=128):
         super(SimpleImplicitScene, self).__init__()
-        
-        self.x_fourier = GaussianFourierFeatureTransform(2, 128, 10)
 
         self.conv_1 = nn.Conv2d(coord_embedding, hidden_dim, kernel_size=1, padding=0)
         self.conv_2 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, padding=0)
@@ -67,10 +65,8 @@ class SimpleImplicitScene(nn.Module):
         self.bn = nn.BatchNorm2d(hidden_dim)
         self.actvn_out = nn.Sigmoid()
 
-    def forward(self, x):
-        x = self.x_fourier(x)
-
-        net = self.bn(self.actvn(self.conv_1(x)))
+    def forward(self, batch):
+        net = self.bn(self.actvn(self.conv_1(batch['points'])))
         net = self.bn(self.actvn(self.conv_2(net)))
         net = self.bn(self.actvn(self.conv_3(net)))
         out = self.actvn_out(self.conv_out(net))
@@ -111,11 +107,11 @@ class FeatureExtractor(nn.Module):
 
         self.displacments = torch.Tensor(displacments)"""
 
-    def forward(self, x, points):
-        
-        p = torch.zeros_like(points)
-        print(points.shape)
-        p[:, :, 0], p[:, :, 1] = 2 * points[:, :, 0], 2 * points[:, :, 1]
+    def forward(self, batch):
+        x = batch['target']
+        points = batch['points']
+        bs, h, w, px = points.shape
+        p = (points * 2 - 1).reshape(bs, 1, h*w, 2)
         #p = torch.cat([p + d for d in self.displacments.to(p.device)], dim=2)  # (B,1,7,num_samples,3)
               
         feature_0 = F.grid_sample(x, p)  # out : (B,C (of x), 1,1,sample_num)

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 import imageio
+from model.model import GaussianFourierFeatureTransform
 
 
 class ImplicitDataset(Dataset):
@@ -29,6 +30,11 @@ class ImplicitDataset(Dataset):
 
         target = torch.tensor(get_image(path)).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
         points = pixels_to_points(target)
+        
+        # points are strictly dependant of batch_size via matrix reshape. Could precompute?`This is for 1`
+        #points = torch.from_numpy(np.load(sample_folder / "x_ff.npy")).squeeze(0) #(1, 2, 256, 10)
+
+        #points = GaussianFourierFeatureTransform(2, 128, 10)(points)
 
         return {
             'name': item,
@@ -44,7 +50,7 @@ def get_image(path):
 def pixels_to_points(image):
     points = np.linspace(0, 1, image.shape[2], endpoint=False)
     xy_grid = np.stack(np.meshgrid(points, points), -1)
-    xy_grid = torch.tensor(xy_grid).permute(2, 0, 1).float().contiguous() # shape: 2,224,224
+    xy_grid = torch.tensor(xy_grid).float().contiguous() # shape: 224,224,2 .permute(2, 0, 1)
     return xy_grid
 
 

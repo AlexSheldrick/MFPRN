@@ -127,9 +127,31 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-.runs/*
-.runs/*/*
-.runs/*/*/*
-.results/*
-.data/*
 
+#
+.*.png 
+.*.zip
+.*.npz
+.*.obj
+.*.ply
+.*.ipynb
+
+# Folders with DATA
+.runs/*/
+.runs/*/*/
+.runs/*/*/*/
+.runs/*/*/*/*/
+.runs/*/*/*/*/*/
+
+.data/*/
+.data/*/*/
+.data/*/*/*/
+.data/*/*/*/*/
+.data/*/*/*/*/*/
+.data/*/*/*/*/*/*/
+.data/*/*/*/*/*/*/*/
+.data/*/*/*/*/*/*/*/*/
+
+.results/*
+.data_processing/old*/*
+.data_processing/stanford*/*

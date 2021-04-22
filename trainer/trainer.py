@@ -21,8 +21,8 @@ class ImplicitTrainer(pl.LightningModule):
     def __init__(self, kwargs):
         super(ImplicitTrainer, self).__init__()
         self.hparams = kwargs
-        #self.model = Network()
-        self.model = SimpleImplicitScene()
+        self.model = Network()
+        #self.model = SimpleImplicitScene()
         self.dataset = lambda split: ImplicitDataset(split, self.hparams.datasetdir, self.hparams.splitsdir, self.hparams)
 
     #Here you could set different learning rates for different layers
@@ -38,26 +38,31 @@ class ImplicitTrainer(pl.LightningModule):
         return torch.utils.data.DataLoader(dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.num_workers, drop_last=True, pin_memory=True)
     
     def val_dataloader(self):
-        dataset = self.dataset('val')
+        dataset = self.dataset('train')
         return torch.utils.data.DataLoader(dataset, batch_size=self.hparams.batch_size, shuffle=False, num_workers=self.hparams.num_workers, drop_last=False)
     
     def forward(self, batch):
-        out = self.model(batch['points'])
+        out = self.model(batch)
         return out
 
     def training_step(self, batch, batch_idx):
-        out = self.forward(batch) # (BS, C, 224, 224)
+        #out = self.forward(batch['target'], batch) # (BS, C, 224, 224)
+        out = self.forward(batch).reshape(self.hparams.batch_size, 3, 224, 224)
+
         loss = torch.nn.functional.l1_loss(out, batch['target'])
         #self.log('loss', loss)
         return {'loss': loss}
     
     def validation_step(self, batch, batch_idx):
-        out = self.forward(batch)
-        loss = torch.nn.functional.mse_loss(out, batch['target'])
+        out = self.forward(batch).reshape(self.hparams.batch_size, 3, 224, 224)
+
+        loss = torch.nn.functional.l1_loss(out, batch['target'])
 
         output_vis_path = Path("runs") / self.hparams.experiment / f"vis" / f'{(self.global_step // 100):05d}'
-        output_vis_path.mkdir(exist_ok=True, parents=True)  
+        output_vis_path.mkdir(exist_ok=True, parents=True)
+
         visualize_implicit_rgb(out[0], output_vis_path / 'cat_out.png')
+        #visualize_implicit_rgb(batch['target'][0], output_vis_path / 'cat_out_gt.png')
 
         #self.log('val_loss', loss)        
         return {'val_loss': loss}
