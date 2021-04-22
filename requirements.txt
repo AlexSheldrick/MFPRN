@@ -1,8 +1,0 @@
-torch
-pyexr
-pathlib
-pil
-trimesh
-marching_cubes
-numpy
-pytorch_lgihtning

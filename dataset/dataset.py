@@ -3,12 +3,13 @@ from torchvision import transforms
 import torch
 from pathlib import Path
 import numpy as np
-from PIL import Image
+
+import imageio
 
 
 class ImplicitDataset(Dataset):
 
-    def __init__(self, split, dataset_path, splitsdir, hparams, transform = None):
+    def __init__(self, split, dataset_path, splitsdir, hparams=None, transform = None):
         self.hparams = hparams
         self.transform = transform
         self.dataset_path = Path(dataset_path)
@@ -16,7 +17,7 @@ class ImplicitDataset(Dataset):
         self.splitsdir = splitsdir
         self.split_shapes = [x.strip() for x in (Path("data/splits") / splitsdir / f"{split}.txt").read_text().split("\n") if x.strip() != ""]
         self.data = [x for x in self.split_shapes]
-        self.data = self.data * (50 if ('overfit' in splitsdir) and split == 'train' else 1)
+        self.data = self.data * (400 if ('overfit' in splitsdir) and split == 'train' else 1)
 
     def __len__(self):
         return len(self.data)
@@ -24,15 +25,27 @@ class ImplicitDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         sample_folder = Path(self.dataset_path) / "processed" / self.splitsdir / item
-        sample_input = np.array(Image.open(sample_folder / "0000.jpg"))#.convert("RGB")).transpose((2, 0, 1))
-        sample_input = torch.from_numpy(sample_input)
-        sample_target = sample_input
+        path = sample_folder / "cat2_scaled.jpg"
+
+        target = torch.tensor(get_image(path)).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
+        points = pixels_to_points(target)
 
         return {
             'name': item,
-            'input': (sample_input).unsqueeze(0),
-            'target': (sample_target).unsqueeze(0)
-        }
+            'points': points,
+            'target': target
+                    }
+
+
+def get_image(path):
+    img = imageio.imread(path)[..., :3] / 255. #normalized to [0,1] (224xH,224xW,3xC) images
+    return img.astype(np.float32)
+
+def pixels_to_points(image):
+    points = np.linspace(0, 1, image.shape[2], endpoint=False)
+    xy_grid = np.stack(np.meshgrid(points, points), -1)
+    xy_grid = torch.tensor(xy_grid).permute(2, 0, 1).float().contiguous() # shape: 2,224,224
+    return xy_grid
 
 
 if __name__ == "__main__":

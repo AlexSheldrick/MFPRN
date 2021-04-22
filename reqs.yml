@@ -8,6 +8,7 @@ dependencies:
   - cudatoolkit
   - tensorboard
   - numpy
+  - imageio
   - pip:
     - pymcubes
     - pytorch-lightning

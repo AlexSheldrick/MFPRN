@@ -1,4 +1,4 @@
-import marching_cubes as mc
+import mcubes as mc
 import numpy as np
 import trimesh
 from PIL import Image
@@ -47,6 +47,12 @@ def visualize_depthmap(depthmap, output_path, flip=False):
     im = Image.fromarray(rescaled)
     im.save(str(output_path) +'.png')
     pyexr.write(str(output_path) +'.exr', depthmap)
+
+def visualize_implicit_rgb(value_grid, output_path):
+    #rescaled = (255.0 / value_grid.max() * (value_grid - value_grid.min())).astype(np.uint8)
+    img = Image.fromarray(value_grid.numpy(), 'RGB')
+    im = Image.fromarray(img)
+    im.save(str(output_path) +'.png')
 
 def scale(path):
     dims = (139, 104, 112)
