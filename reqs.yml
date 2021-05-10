@@ -14,3 +14,8 @@ dependencies:
     - pytorch-lightning
     - torch
     - torchvision
+    - plyfile
+    - mesh-to-sdf
+    
+    
+#pip3 install 

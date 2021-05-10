@@ -155,3 +155,10 @@ dmypy.json
 .results/*
 .data_processing/old*/*
 .data_processing/stanford*/*
+*.png
+*.out.tfevents.*
+*hparams.*
+*.obj
+/data_processing/stanford-shapenet-renderer-master/LICENSE
+*.ply
+*.ipynb

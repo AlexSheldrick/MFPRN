@@ -18,7 +18,7 @@ def parse_arguments():
     parser.add_argument('--save_epoch', type=int, default=50, help='save every nth epoch')
     parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
-    parser.add_argument('--experiment', type=str, default='scenes_net', help='experiment directory')
+    parser.add_argument('--experiment', type=str, default='implicit_net', help='experiment directory')
     parser.add_argument('--seed', type=int, default=-1, help='random seed')
 
     parser.add_argument('--num_points', type=int, default=2048)

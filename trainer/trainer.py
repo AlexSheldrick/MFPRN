@@ -13,6 +13,7 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import loggers as pl_loggers
 
+
 import os
 import numpy as np
 
@@ -55,17 +56,22 @@ class ImplicitTrainer(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         out = self.forward(batch).reshape(self.hparams.batch_size, 3, 224, 224)
-
         loss = torch.nn.functional.l1_loss(out, batch['target'])
+        self.log('val_loss', loss)
+        self.visualize(out, batch)      
+        return {'val_loss': loss}
 
+    def visualize(self, data, batch):
         output_vis_path = Path("runs") / self.hparams.experiment / f"vis" / f'{(self.global_step // 100):05d}'
         output_vis_path.mkdir(exist_ok=True, parents=True)
 
-        visualize_implicit_rgb(out[0], output_vis_path / 'cat_out.png')
+        images = torch.cat((data[0], batch['target'][0]), dim=-1)
+        self.logger.experiment.add_image('output/target', images, self.current_epoch)
+        #self.logger.experiment.add_image('target', batch['target'][0], self.current_epoch)
+
+        #visualize_implicit_rgb(out[0], output_vis_path / 'cat_out.png')
         #visualize_implicit_rgb(batch['target'][0], output_vis_path / 'cat_out_gt.png')
 
-        #self.log('val_loss', loss)        
-        return {'val_loss': loss}
 
 
 def train_scene_net(args):
@@ -92,3 +98,12 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore", category=UserWarning) 
     _args = arguments.parse_arguments()
     train_scene_net(_args)
+
+    """
+    # get some random training images
+    dataiter = iter(trainloader)
+    images, labels = dataiter.next()
+
+    # create grid of images
+    img_grid = torchvision.utils.make_grid(images)
+    """
