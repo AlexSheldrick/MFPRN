@@ -39,7 +39,7 @@ def visualize_point_list(grid, output_path):
 
 def visualize_rgb_pointcloud(point_cloud, output_path):
     c = np.zeros_like(point_cloud[:,:3])
-    print(c.shape)
+    #print(c.shape)
     with open(output_path, "w") as f:        
         if point_cloud.shape[1] == 6:
             c = point_cloud[:, 3:]
@@ -48,9 +48,15 @@ def visualize_rgb_pointcloud(point_cloud, output_path):
             f.write('v %f %f %f %f %f %f\n' % (x, y ,z, c[i,0], c[i,1], c[i,2]))
 
 
-def visualize_sdf(sdf, output_path, level=0.75):
+def visualize_sdf(sdf, output_path, level=0.75, rgb=False):
+    if rgb:
+        rgb = sdf[...,1:]
+        sdf = sdf[...,0].squeeze()
     vertices, triangles = mc.marching_cubes(sdf.astype(float), level)
-    mc.export_obj(vertices, triangles, output_path)
+    vertices /= sdf.shape[0]
+    vertices -= 0.5
+    print(vertices.shape, sdf.shape)
+    mc.export_obj(vertices, triangles, output_path) #could use rgb here, define and export a pointcloud
 
 
 def visualize_grid(grid, output_path):
@@ -89,7 +95,7 @@ def scale(path):
     #mesh.apply_translation(-np.array(dims)/2)
     mesh.apply_scale(1 / total_size)
     new_path = str(path)[:-4] + "_scaled.obj"
-    print(new_path)
+    #print(new_path)
     mesh.export(new_path)
 
 if __name__ == "__main__":

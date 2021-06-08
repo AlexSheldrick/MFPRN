@@ -162,3 +162,8 @@ dmypy.json
 /data_processing/stanford-shapenet-renderer-master/LICENSE
 *.ply
 *.ipynb
+*.mtl
+*.ckpt
+*.txt
+*.npz
+*.json

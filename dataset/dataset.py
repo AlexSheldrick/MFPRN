@@ -5,18 +5,20 @@ from pathlib import Path
 import numpy as np
 
 import imageio
-from .model.model import GaussianFourierFeatureTransform
+#from .model.model import GaussianFourierFeatureTransform
 
 
 class ImplicitDataset(Dataset):
 
     def __init__(self, split, dataset_path, splitsdir, hparams=None, transform = None):
+        
         self.hparams = hparams
+        self.clamp = self.hparams.clamp
         self.transform = transform
         self.dataset_path = Path(dataset_path)
         self.split = split
         self.splitsdir = splitsdir
-        self.split_shapes = [x.strip() for x in (Path("data/splits") / splitsdir / f"{split}.txt").read_text().split("\n") if x.strip() != ""]
+        self.split_shapes = [x.strip() for x in (Path("../data/splits") / splitsdir / f"{split}.txt").read_text().split("\n") if x.strip() != ""]
         self.data = [x for x in self.split_shapes]
         self.data = self.data * (400 if ('overfit' in splitsdir) and split == 'train' else 1)
 
@@ -28,13 +30,18 @@ class ImplicitDataset(Dataset):
         sample_folder = Path(self.dataset_path) / "processed" / self.splitsdir / item
         #path = sample_folder / "cat2_scaled.jpg"
 
+        #this can be replaced by openexr 4 channel RGBD readout
+        """myrand = np.random.rand(8,224,224,4) #8 batches of 224x224 RGBD images
+        myrand_split_1, myrand_split_2 = np.split(myrand, [3], axis=3)
+        print(myrand_split_1.shape, myrand_split_2.shape)""" ##split_1 is rgb and split_2 is d
         target = torch.tensor(get_image(sample_folder / 'rgb.png')).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
         depth = torch.tensor(get_image(sample_folder / 'depth.png')).unsqueeze(2).permute(2, 0, 1) # (224xH,224xW,1xC) --> (1C, 224xH, 224xW)
-        points, rgb, sdf = self.prepare_points(sample_folder)
+        
 
-        points = pixels_to_points(target)
-        rgb, sdf = [], []
-        depth = []
+        points, rgb, sdf = self.prepare_points(sample_folder)
+        #points = pixels_to_points(target)
+        #rgb, sdf = [], []
+        #depth = []        
         
         # points are strictly dependant of batch_size via matrix reshape. Could precompute?`This is for 1`
         #points = torch.from_numpy(np.load(sample_folder / "x_ff.npy")).squeeze(0) #(1, 2, 256, 10)
@@ -52,27 +59,35 @@ class ImplicitDataset(Dataset):
 
     def prepare_points(self, sample_folder):
         
-        points = []
-        rgb = []
-        sdf = []
+        points, rgb, sdf = [], [], []
+        
+        sample_points = np.load(sample_folder / "point_samples.npz")
 
-        for sample in ['surface', 'sampled']:
-            
-            sample_points = np.load(sample_folder / f"pc_{sample}.npz")
+        subsample_indices = np.random.randint(0, sample_points['points'].shape[0], self.hparams.num_points)
 
-            sampling_points = sample_points['points']
-            sampling_rgb = sample_points['rgb']
-            sampling_sdf = sample_points['sdf']
+        points = sample_points['points'][subsample_indices]
+        rgb = sample_points['rgb'][subsample_indices]
+        sdf = sample_points['sdf'][subsample_indices]
 
-            subsample_indices = np.random.randint(0, sampling_points.shape[0], self.hparams.num_points)
+        points = torch.from_numpy(points.astype(np.float32)).reshape(-1,3)
+        rgb = torch.from_numpy(rgb.astype(np.float32)).reshape(-1,3)        
+        sdf = torch.from_numpy(sdf.astype(np.float32))
 
-            np.append(points, sampling_points[subsample_indices])
-            np.append(rgb, sampling_rgb[subsample_indices])
-            np.append(sdf, sampling_sdf[subsample_indices])
+        #to truncate sdf to a treshold
+        if self.clamp > 0:
+            sdf[sdf > self.clamp] = self.clamp
+            sdf[sdf < -self.clamp] = -self.clamp
 
-        points = torch.from_numpy(np.array(points, dtype='float32'))
-        rgb = torch.from_numpy(np.array(points, dtype='float32'))
-        sdf = torch.from_numpy(np.array(points, dtype='float32'))
+        #this turns sdf into occupancy
+        elif self.clamp == 0:
+            sdf[sdf > 0] = 0
+            sdf[sdf < 0] = 1
+
+        #this sets it to UDF with 0.2 clamping
+        elif self.clamp  == -1:
+            sdf[sdf < 0] = -sdf[sdf<0]
+            sdf[sdf > 0.2] = 0.2            
+
 
         return points, rgb, sdf
 
@@ -92,6 +107,9 @@ def pixels_to_points(image):
 
 
 if __name__ == "__main__":
-    dataset = ImplicitDataset("train", "data", "overfit")
+    from util import arguments
+    _args = arguments.parse_arguments()
+    dataset = ImplicitDataset("train", "../data", "overfit", _args)
     datatest = dataset[0]
     print(dataset[0])
+    print(dataset[0]['sdf'].shape)
