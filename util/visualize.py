@@ -1,13 +1,175 @@
 import mcubes as mc
 import numpy as np
+from pytorch3d.renderer.cameras import FoVOrthographicCameras
 import trimesh
 from PIL import Image
 from pathlib import Path
 import pyexr
 import torch
+from util.load_obj import read_obj
+import imageio
+from skimage import img_as_ubyte
+import pyexr
+
+# Data structures and functions for rendering
+from pytorch3d.structures import Meshes
+from pytorch3d.datasets import (ShapeNetCore)
+from pytorch3d.renderer import (
+    look_at_view_transform,
+    FoVPerspectiveCameras, 
+    PointLights, 
+    RasterizationSettings, 
+    MeshRenderer, 
+    MeshRasterizer,  
+    SoftPhongShader,
+    TexturesVertex,
+    HardFlatShader
+)
+
+def render_mesh(obj_filename, outpath=None):
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+    
+    verts, faces = read_obj(obj_filename)
+    verts = torch.from_numpy(verts)
+    faces = torch.from_numpy(faces).unsqueeze(0).to(device)
+
+    verts_cv = verts.detach().clone()
+    verts_cv[...,0] = -verts[...,0]
+    verts_cv[...,2] = -verts[...,2]
+
+    verts = verts_cv.unsqueeze(0).to(device)
+
+    verts, rgb = torch.split(verts, 3, dim=-1)
+    
+    textures = TexturesVertex(verts_features=rgb)
+    mesh = Meshes(verts, faces, textures)
+    batchsize=4
+    meshes = mesh.extend(batchsize)
+    lastpt = 360 - 360/batchsize - 60
+    azim = torch.linspace(-60, lastpt, batchsize)
+    R, T = look_at_view_transform(1.7, 20, azim)
+
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
+
+    raster_settings = RasterizationSettings(
+        image_size=224, 
+        blur_radius=0.0, 
+        faces_per_pixel=3, 
+        max_faces_per_bin=300000,
+        perspective_correct=True
+    )
+    lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+
+    renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(
+            cameras=cameras, 
+            raster_settings=raster_settings
+        ),
+        shader=HardFlatShader(
+            device=device, 
+            cameras=cameras,
+            lights=lights
+        )
+    )
+    images = renderer(meshes)
+    
+    if outpath is not None:
+        for i in range(batchsize):
+            visualize_implicit_rgb(images[i], outpath+str(i))
+
+    return images
+
+def render_shapenet(shapenet_id_dict, outpath='../data/processed/car', idx=0, batchsize = 12, distance=1.2, verbose=True):
+    #shapenet_idx is a tuple (idx, id)
+    
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+    
+    #device = torch.device("cpu")
+    SHAPENET_PATH = "../data/ShapeNetCore.v2"
+    shapenet_dataset = ShapeNetCore(SHAPENET_PATH, version = 2, synsets=['02958343'])
+
+    #render for every mesh
+    ids = shapenet_id_dict[int(idx)]
+    
+    if verbose: print('rendering:',idx, ids, datetime.datetime.now())
+    ids = [ids] * batchsize
+    
+    lastpt = 360 - 360/batchsize - 180
+    azim = torch.linspace(-180, lastpt, batchsize)
+    R, T = look_at_view_transform(distance, 20, azim)
+
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
+
+    raster_settings = RasterizationSettings(
+        image_size=224, 
+        blur_radius=0.0, 
+        faces_per_pixel=3, 
+        cull_backfaces=True,
+        max_faces_per_bin=300000,
+        perspective_correct=True
+    )
+    lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+    
+    #this line uses a modified MeshRenderer (replaced MeshRenderer with MeshRendererWithFragments in ShapeNet Dataset Base Class)
+    images, fragments = shapenet_dataset.render(
+        model_ids=ids,
+        device=device,
+        cameras=cameras,
+        raster_settings=raster_settings,
+        lights=lights,
+        shader_type=HardFlatShader,
+    
+    )
+
+    z = fragments.zbuf[...,0]
+    z = z.unsqueeze(-1)
+
+    if outpath is not None:
+        
+        out_path = Path(outpath) / str(idx).zfill(5)
+        
+
+        images_exr = torch.cat((images, z), dim=-1)
+        z_img = (z - z.min()) / (z.max() - z.min())*2-1
+
+        for j in range(batchsize):
+            pyexr.write(str(out_path / f'rgb{str(j).zfill(2)}.exr'), images_exr[j].squeeze().cpu().numpy(), ['R','G','B','A','D'])
+
+            
+            imageio.imwrite(str(out_path / f'rgb{str(j).zfill(2)}.png'), img_as_ubyte(images[j,:,:,:].cpu()))
+            imageio.imwrite(str(out_path / f'depth{str(j).zfill(2)}.png'), img_as_ubyte(z_img[j,:,:,:].cpu()))
+    else:
+        return images, z
 
 
-def rgba_to_rgb():
+def visualize_implicit_rgb(value_grid, output_path):
+    img = tensor_to_numpy(value_grid)
+    img = imageio.imwrite(str(output_path)+'.png', img[...,:3])
+
+def tensor_to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    with torch.no_grad():
+        tensor = tensor * 256
+        tensor[tensor > 255] = 255
+        tensor[tensor < 0] = 0
+        tensor = tensor.type(torch.uint8)
+        if tensor.size(-1) > 4: tensor = tensor.permute(1, 2, 0)
+        tensor = tensor.detach().cpu().numpy()
+    return tensor
+
+
+def rgba_to_rgb(source):
+
+    #target = source.copy()
+    #target[0] = ((1-))
+
     """There is an algorithm for this (from this wikipedia link):
     https://en.wikipedia.org/wiki/Alpha_compositing
 
@@ -34,7 +196,7 @@ def visualize_point_list(grid, output_path):
     for i in range(grid.shape[0]):
         x, y, z = grid[i, 0], grid[i, 1], grid[i, 2]
         c = [1, 1, 1]
-        f.write('v %f %f %f %f %f %f\n' % (x + 0.5, y + 0.5, z + 0.5, c[0], c[1], c[2]))
+        f.write('v %f %f %f %f %f %f\n' % (x, y, z, c[0], c[1], c[2]))
     f.close()
 
 def visualize_rgb_pointcloud(point_cloud, output_path):
@@ -48,16 +210,32 @@ def visualize_rgb_pointcloud(point_cloud, output_path):
             f.write('v %f %f %f %f %f %f\n' % (x, y ,z, c[i,0], c[i,1], c[i,2]))
 
 
-def visualize_sdf(sdf, output_path, level=0.75, rgb=False):
+def visualize_sdf(sdf, output_path, level=0.75, rgb=False, export=False):
     if rgb:
         rgb = sdf[...,1:]
         sdf = sdf[...,0].squeeze()
     vertices, triangles = mc.marching_cubes(sdf.astype(float), level)
     vertices /= sdf.shape[0]
     vertices -= 0.5
-    print(vertices.shape, sdf.shape)
-    mc.export_obj(vertices, triangles, output_path) #could use rgb here, define and export a pointcloud
+    
+    if export: 
+        mc.export_obj(vertices, triangles, output_path)
+        print(vertices.shape, sdf.shape) #could use rgb here, define and export a pointcloud
 
+    return vertices, triangles
+
+def make_col_mesh(verts, faces, rgb, outpath):
+    if verts.size > 0:         
+        #min max norm might not give authentic colors
+        #rgb = ((rgb - rgb.min())/(rgb.max() - rgb.min())*255).astype(np.uint8)
+        if np.all(rgb >= -1) and np.all(rgb<= 1): rgb = (255*(rgb/2 + 0.5)).astype(np.uint8) #from (-1,1) to (0,1)
+        else: 
+            print('vertex colors out of range')
+            rgb = ((rgb - rgb.min())/(rgb.max() - rgb.min())*255).astype(np.uint8)
+        mymesh = trimesh.Trimesh(vertices=verts, vertex_colors=rgb, faces=faces)
+        print(verts.shape, faces.shape, rgb.shape)
+        with open(outpath, 'w') as f:
+            f.writelines(trimesh.exchange.obj.export_obj(mymesh))
 
 def visualize_grid(grid, output_path):
     point_list = to_point_list(grid)
@@ -82,11 +260,6 @@ def visualize_depthmap(depthmap, output_path, flip=False):
     im.save(str(output_path) +'.png')
     pyexr.write(str(output_path) +'.exr', depthmap)
 
-def visualize_implicit_rgb(value_grid, output_path):
-    #rescaled = (255.0 / value_grid.max() * (value_grid - value_grid.min())).astype(np.uint8)
-    img = Image.fromarray(value_grid.numpy(), 'RGB')
-    im = Image.fromarray(img)
-    im.save(str(output_path) +'.png')
 
 def scale(path):
     dims = (139, 104, 112)
@@ -99,6 +272,22 @@ def scale(path):
     mesh.export(new_path)
 
 if __name__ == "__main__":
-    path = Path("/home/alex/Documents/ifnet_scenes-main/ifnet_scenes/data/visualizations/overfit/00000")
-    path = path / "mesh.obj"
-    scale(path)
+    from util.bookkeeping import list_model_ids
+    import datetime
+    import warnings
+    warnings.filterwarnings('ignore')
+    id_dict = list_model_ids(save=False)
+    offset = 3471
+    offset = [i for i in range(offset, len(id_dict.keys()))]
+    # Memerr[1775, 1772, 1862, 1902, 1999, 2015, 2040, 2060, 2132, 2150, 2187, 2205, 2216, 2217]
+    # Memerr[2278, 2280, 2281, 2283, 2284, 2287, 2289, 2290, 2292, 2296, 2344, 2388, 2450, 2497, 2559, 2636, 2694, 2725, 2806, 2811, 2827, 2886, 2916, 2922, 2933, 2956, 2972, 2978, 3014, 3015, 3025, 3042, 3047, 3051, 3068, 3073, 3075, 3118, 3361, 3434, 3470, 3486]
+    # 2276 throws error (cannot identify image file texture_6)
+    offset = [3]
+
+    print('renderings remaining:',len(id_dict.keys())-offset[0])
+    for i in offset:
+        try: render_shapenet(id_dict, idx=i, outpath='../data/processed/car')
+        except IndexError:
+            print(i,'Index Error')
+        except RuntimeError:
+            print(i,'Memory Error')

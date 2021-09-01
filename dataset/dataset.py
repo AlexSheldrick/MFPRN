@@ -3,10 +3,8 @@ from torchvision import transforms
 import torch
 from pathlib import Path
 import numpy as np
-
-import imageio
-#from .model.model import GaussianFourierFeatureTransform
-
+import pyexr
+from skimage.color import rgba2rgb
 
 class ImplicitDataset(Dataset):
 
@@ -21,90 +19,95 @@ class ImplicitDataset(Dataset):
         self.split_shapes = [x.strip() for x in (Path("../data/splits") / splitsdir / f"{split}.txt").read_text().split("\n") if x.strip() != ""]
         self.data = [x for x in self.split_shapes]
         self.data = self.data * (400 if ('overfit' in splitsdir) and split == 'train' else 1)
+        # feature extractor hparam, only batch relevant info
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        sample_folder = Path(self.dataset_path) / "processed" / self.splitsdir / item
-        #path = sample_folder / "cat2_scaled.jpg"
+        sample_folder = Path(item)
 
-        #this can be replaced by openexr 4 channel RGBD readout
-        """myrand = np.random.rand(8,224,224,4) #8 batches of 224x224 RGBD images
-        myrand_split_1, myrand_split_2 = np.split(myrand, [3], axis=3)
-        print(myrand_split_1.shape, myrand_split_2.shape)""" ##split_1 is rgb and split_2 is d
-        target = torch.tensor(get_image(sample_folder / 'rgb.png')).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
-        depth = torch.tensor(get_image(sample_folder / 'depth.png')).unsqueeze(2).permute(2, 0, 1) # (224xH,224xW,1xC) --> (1C, 224xH, 224xW)
+        sample_idx = str(np.random.randint(0,30)*12).zfill(3)
         
+        #image = torch.tensor(get_image(sample_folder / f'rgb{sample_idx}.png')).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
+        #depth = torch.tensor(get_image(sample_folder / f'depth{sample_idx}.png')).unsqueeze(2).permute(2, 0, 1) # (224xH,224xW,1xC) --> (1C, 224xH, 224xW)
 
         points, rgb, sdf = self.prepare_points(sample_folder)
-        #points = pixels_to_points(target)
-        #rgb, sdf = [], []
-        #depth = []        
         
-        # points are strictly dependant of batch_size via matrix reshape. Could precompute?`This is for 1`
-        #points = torch.from_numpy(np.load(sample_folder / "x_ff.npy")).squeeze(0) #(1, 2, 256, 10)
+        #only send depth if necessary
+        depth = torch.empty((1,1))
 
-        #points = GaussianFourierFeatureTransform(2, 128, 10)(points)
+        #convert RGBA to RGB image with random background
+        image = pyexr.read(str(sample_folder / f'_r_{sample_idx}.exr'))
+        background = np.random.rand(3,)
+        image = rgba2rgb(image, background = background)
+        image = torch.from_numpy(image).permute(2, 0, 1)
+        image = (image-image.min())/(image.max()-image.min())
+        
+        #depth = pyexr_array[4,...].unsqueeze(0)
+        #depth = torch.from_numpy(pyexr.read(str(sample_folder / f'_r_{sample_idx}_depth0001.exr'))).permute(2, 0, 1)[0,...].unsqueeze(0)
 
-        return { #rgb, depth, points
+        #only send voxels if necessary
+        voxels = torch.empty((1,1))
+        
+        if self.hparams.encoder in ('conv3d', 'ifnet', 'hybrid', 'hybrid_ifnet'):
+            voxels = torch.from_numpy(np.load(sample_folder / 'voxels.npy').astype(np.float32)).unsqueeze(0)
+            if self.hparams.fieldtype == 'occupancy':
+                occvoxel = voxels.clone().detach()
+                occvoxel[voxels <= 0] = 1
+                occvoxel[voxels > 0] = 0
+                voxels = occvoxel
+        
+        if self.hparams.encoder in ('conv2d_pretrained', 'conv2d_pretrained_projective', 'hybrid', 'hybrid_ifnet'):
+            image = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))(image)
+
+        camera = torch.from_numpy(np.loadtxt(sample_folder / f'RT{sample_idx}.txt').astype(np.float32))
+        xyz_to_blender = torch.tensor([[1, 0, 0],[0,0,-1],[0,1,0]], dtype=torch.float32)
+        camera[:3,:3] = camera[:3,:3] @ xyz_to_blender
+        #fx = 245, fy=245, cx = 112, cy = 112
+
+        return {
             'name': item,
+            'camera': camera,
             'points': points,
             'rgb': rgb,
             'sdf': sdf,
             'depth': depth,
-            'target': target
+            'image': image,
+            'voxels':voxels,
+            'sample_idx':sample_idx
                     }
 
     def prepare_points(self, sample_folder):
         
         points, rgb, sdf = [], [], []
         
-        sample_points = np.load(sample_folder / "point_samples.npz")
+        sample_points = np.load(sample_folder / "point_samples_blender.npz")
 
         subsample_indices = np.random.randint(0, sample_points['points'].shape[0], self.hparams.num_points)
 
         points = sample_points['points'][subsample_indices]
         rgb = sample_points['rgb'][subsample_indices]
-        sdf = sample_points['sdf'][subsample_indices]
+        sdf = sample_points[f'{self.hparams.fieldtype}'][subsample_indices]
 
         points = torch.from_numpy(points.astype(np.float32)).reshape(-1,3)
-        rgb = torch.from_numpy(rgb.astype(np.float32)).reshape(-1,3)        
+        rgb = torch.from_numpy(rgb.astype(np.float32)).reshape(-1,3)
         sdf = torch.from_numpy(sdf.astype(np.float32))
 
-        #to truncate sdf to a treshold
-        if self.clamp > 0:
-            sdf[sdf > self.clamp] = self.clamp
-            sdf[sdf < -self.clamp] = -self.clamp
-
-        #this turns sdf into occupancy
-        elif self.clamp == 0:
-            sdf[sdf > 0] = 0
-            sdf[sdf < 0] = 1
-
-        #this sets it to UDF with 0.2 clamping
-        elif self.clamp  == -1:
-            sdf[sdf < 0] = -sdf[sdf<0]
-            sdf[sdf > 0.2] = 0.2            
-
+        #normalize RGB to 0, 1
+        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())    
 
         return points, rgb, sdf
 
-def get_image(path):
-    img = imageio.imread(path)
-    if img.ndim > 2:
-        img = img[..., :3] / 255. #normalized to [0,1] (224xH,224xW,3xC) images
-    else: img = img / 255.
 
-    return img.astype(np.float32)
-
-def pixels_to_points(image):
-    points = np.linspace(0, 1, image.shape[2], endpoint=False)
-    xy_grid = np.stack(np.meshgrid(points, points), -1)
-    xy_grid = torch.tensor(xy_grid).float().contiguous() # shape: 224,224,2 .permute(2, 0, 1)
-    return xy_grid
-
+def rotate_world_to_view(points, R, T):
+    xyz_to_blender = np.array([[1, 0, 0],[0,0,-1],[0,1,0]])
+    R_b2CV = np.array([[-1,0,0],[0,-1,0],[0,0,1]], dtype=np.float32)
+    
+    viewpoints = (R @ xyz_to_blender @ points.transpose(1,0)).transpose(1,0) + T
+    viewpoints = (R_b2CV @ viewpoints.transpose()).transpose()
+    return viewpoints
 
 if __name__ == "__main__":
     from util import arguments

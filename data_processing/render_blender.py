@@ -6,7 +6,9 @@
 # Example:
 # blender --background --python mytest.py -- --views 10 /path/to/my.obj
 # blender --background --python render_blender.py -- --output_folder ../data/blender/ '/media/alex/SSD Datastorage/guided-research/data/processed/overfit/car/85f6145747a203becc08ff8f1f541268/models/model_normalized.obj'
-#
+# blender --background --python data_processing/render_blender.py -- --output_folder ../data/blender/ '/media/alex/SSD Datastorage/data/processed/car/00000/norm.obj'
+# blender --background --python data_processing/render_blender.py -- --output_folder ../data/blender/ '/media/alex/SSD Datastorage/data/processed/car/00000/norm.obj' --format 'OPEN_EXR' --color_depth 16
+
 
 import argparse, sys, os, math, re
 import bpy
@@ -91,8 +93,8 @@ def get_calibration_matrix_K_from_blender(camd):
 def get_3x4_RT_matrix_from_blender(cam):
     # bcam stands for blender camera
     R_bcam2cv = Matrix(
-        ((1, 0,  0),
-        (0, -1, 0),
+        ((-1, 0,  0),
+        (0, 1, 0),
         (0, 0, -1)))
 
     # Transpose since the rotation is object rotation, 
@@ -311,7 +313,7 @@ bpy.ops.object.light_add(type='SUN')
 light2 = bpy.data.lights['Sun']
 light2.use_shadow = False
 light2.specular_factor = 1.0
-light2.energy = 0.015
+light2.energy = 10
 bpy.data.objects['Sun'].rotation_euler = bpy.data.objects['Light'].rotation_euler
 bpy.data.objects['Sun'].rotation_euler[0] += 180
 
@@ -337,7 +339,7 @@ stepsize = 360.0 / args.views
 rotation_mode = 'XYZ'
 
 model_identifier = os.path.split(os.path.split(args.obj)[0])[1]
-fp = os.path.join(os.path.abspath(args.output_folder), model_identifier, model_identifier)
+fp = os.path.join(os.path.abspath(args.output_folder))
 
 #write intrinsics to folder
 #K = get_calibration_matrix_K_from_blender(bpy.data.objects['Camera'].data)
@@ -346,14 +348,8 @@ fp = os.path.join(os.path.abspath(args.output_folder), model_identifier, model_i
 
 for i in range(0, args.views):
     print("Rotation {}, {}".format((stepsize * i), math.radians(stepsize * i)))
-    #write Intrinsics and Extrinsics to txt
-    P, K, RT = get_3x4_P_matrix_from_blender(cam)
-    nP, nK, nRT = np.matrix(P), np.matrix(K), np.matrix(RT)
-    np.savetxt(args.output_folder+f"models/P{int(stepsize * i):03}.txt", nP) # to select precision, use e.g. fmt='%.2f'
-    np.savetxt(args.output_folder+f"models/K{int(stepsize * i):03}.txt", nK)
-    np.savetxt(args.output_folder+f"models/RT{int(stepsize * i):03}.txt", nRT)
 
-    render_file_path = fp + '_r_{0:03d}'.format(int(i * stepsize))
+    render_file_path = fp + '/_r_{0:03d}'.format(int(i * stepsize))
     
     scene.render.filepath = render_file_path
     depth_file_output.file_slots[0].path = render_file_path + "_depth"
@@ -362,6 +358,14 @@ for i in range(0, args.views):
     id_file_output.file_slots[0].path = render_file_path + "_id"
 
     bpy.ops.render.render(write_still=True)  # render still
+
+    #write Intrinsics and Extrinsics to txt
+    P, K, RT = get_3x4_P_matrix_from_blender(cam)
+    nP, nK, nRT = np.matrix(P), np.matrix(K), np.matrix(RT)
+    #np.savetxt(os.path.join(os.path.abspath(args.output_folder), model_identifier)+f"/P{int(stepsize * i):03}.txt", nP) 
+    # to select precision, use e.g. fmt='%.2f'
+    #np.savetxt(args.output_folder+f"models/K{int(stepsize * i):03}.txt", nK)
+    np.savetxt(os.path.join(os.path.abspath(args.output_folder))+f"/RT{int(stepsize * i):03}.txt", nRT)
 
     cam_empty.rotation_euler[2] += math.radians(stepsize)
 

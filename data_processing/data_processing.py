@@ -1,45 +1,227 @@
+from typing import List
 import numpy as np
+import igl
+import os
 import subprocess
+try:
+    from subprocess import DEVNULL  # Python 3.
+except ImportError:
+    DEVNULL = open(os.devnull, 'wb')
+
+import datetime
+
 import trimesh
 from plyfile import PlyData
-from mesh_to_sdf import sample_sdf_near_surface
-#import glob
-#from ..util.arguments import *
+from mesh_to_sdf import sample_sdf_near_surface, mesh_to_voxels, mesh_to_sdf
 from pathlib import Path
+from sklearn.neighbors import KDTree
+import glob
+import pyexr
+from skimage.io import imsave
+from skimage import img_as_ubyte
+from skimage.color import rgba2rgb
+
 
 #open all the relevant paths (glog, pathlib)
 # for each mesh: load (trimesh), translate, scale (-> save T), sample sdf, set RGB=0, save points
 # for each mesh: load (cc), apply T, sample RGB, set sdf=0, save points, save mesh
+def add_noise(points, sigma):
+    n = len(points)
+    
+    #randomize which index gets which noise added, but leave order unchanged
+    rndindx = np.random.permutation(np.array(range(n)))
+    gt = int(0.2*n) 
+    fine = gt+int(0.395*n)
+    coarse = fine+int(0.4*n)
+    o,a,b,c = np.split(rndindx, [gt, fine, coarse])
 
-def process_sample(inpath, outpath, verbose=False, num_points=100000, fraction=45/50, sigma=0.003):
-    print(inpath,'\n',outpath)
+    #points[o] += 0
+    points[a] += np.random.normal(0, 0.003, size=(points[gt:fine].shape))
+    points[b] += np.random.normal(0, 0.02, size=(points[fine:coarse].shape))
+    points[c] += np.random.normal(0, 0.08, size=(points[coarse:].shape))
+    random_points = np.random.uniform(-1, 1, size=(points[coarse:].shape))
+    return points, random_points
+
+def reprojected_sampling(inpath, outpath, verbose=False, num_points=100000, sigma=0.003, truncate=0.1, voxel_resolution=64):
+    pointcloud = trimesh.load(inpath)
+    #points from reprojection (~400k)
+    #if points < threshold return error
+    #subsample 10k points (sdf=0)
+
+
+def process_sample_v3(inpath, outpath, verbose=False, num_points=100000, sigma=0.003, truncate=1.0, voxel_resolution=64):
+    if verbose: print(inpath,'\n',outpath)
+    name = str(inpath).split('/')[-1]
+
+    mesh, transform_matrix = load_and_normalize_mesh(inpath) 
+    transform_txt = str(outpath / 'transform.txt')
+    np.savetxt(transform_txt, transform_matrix) 
+
+    if verbose: print(f'starting job {name}')
+    points, rgb, _ = process_sample_rgb(inpath, outpath, num_points)
+
+    noisy_points, points_rnd = add_noise(points, sigma)
+    noisy_rgb = copy_colors_nearest_neighbor(points, noisy_points, rgb, k=5)
+    rgb_rnd = copy_colors_nearest_neighbor(points, points_rnd, rgb, k=5)
+
+    points = np.append(noisy_points, points_rnd).reshape(-1,3)
+    rgb = np.append(noisy_rgb,rgb_rnd).reshape(-1,3)
+
+    if np.any( mesh.centroid >0.02 ): 
+        print(f'model not centered')
+        print(f'{mesh.centroid = }')
+        print(f'{mesh.extents = }')
+    #get SDF with backup method if first method fails
+    sdf = mesh_to_sdf(mesh, points)
+    if np.count_nonzero(sdf < 0) < 40000:
+        print('not enough inside points for camera, trying sdf_to_mesh:depth')
+        sdf_2 = mesh_to_sdf(mesh, points, sign_method='depth')
+        if np.count_nonzero(sdf < sdf_2): sdf = sdf_2
+        else: pass
+
+    #points_outside = points[points > mesh.bounds[1] or points < mesh.bounds[0]]
+    #set all sdf for outside points to |sdf|
+    sdf[np.any(points > mesh.bounds[1],axis=1)] = np.abs(sdf[np.any(points > mesh.bounds[1],axis=1)])
+    sdf[np.any(points < mesh.bounds[0],axis=1)] = np.abs(sdf[np.any(points < mesh.bounds[0],axis=1)])
+    
+    sdf[sdf > truncate] = truncate
+    sdf[sdf < -truncate] = -truncate
+
+    udf = np.absolute(sdf)
+    
+    #this turns sdf into occupancy
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0    
+
+    filename = str(outpath / 'point_samples_fix')
+    np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy, udf=udf)
+
+    if voxel_resolution > 0:
+        if verbose: print(f'voxelizing')
+        vox = mesh_to_voxels(trimesh.load(inpath), voxel_resolution=voxel_resolution)
+        vox /= 2 #bring it from -1,1 mesh to -0.5, 0.5 mesh values
+        vox[vox < - truncate] = -truncate
+        vox[vox > truncate] = truncate
+        np.save(str(outpath / 'voxels'), vox)
+          
+    if verbose: print(f'finished job {name}')
+    return points, rgb, occupancy
+
+def process_sample_v2(inpath, outpath, verbose=False, num_points=100000, sigma=0.003, truncate=1.0, voxel_resolution=64):
+    if verbose: print(inpath,'\n',outpath)
+    name = str(inpath).split('/')[-1]
+    
+    if verbose: print(f'starting job {name}')
+    points, rgb, _ = process_sample_rgb(inpath, outpath, num_points)
+    
+    points, points_rnd = add_noise(points, sigma)
+    rgb_rnd = copy_colors_nearest_neighbor(points, points_rnd, rgb)
+
+    mesh, transform_matrix = load_and_normalize_mesh(inpath) 
+    transform_txt = str(outpath / 'transform.txt')
+    np.savetxt(transform_txt, transform_matrix) 
+    
+    verts = mesh.vertices
+    faces = mesh.faces
+
+    points = np.append(points, points_rnd).reshape(-1,3)
+    rgb = np.append(rgb,rgb_rnd).reshape(-1,3)
+    sdf, _, _ = igl.signed_distance(points, verts, faces)
+    
+    filename = str(outpath / 'point_samples_new')
+
+    sdf[sdf > truncate] = truncate
+    sdf[sdf < -truncate] = -truncate
+    
+    #this turns sdf into occupancy
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0
+
+    udf = sdf.copy()
+    udf[sdf < 0] = -sdf[sdf<0]
+    udf[udf > truncate] = truncate
+
+    np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy, udf=udf)
+
+    if voxel_resolution > 0:
+        if verbose: print(f'voxelizing')
+        vox = mesh_to_voxels(trimesh.load(inpath), voxel_resolution=voxel_resolution)
+        vox /= 2 #bring it from -1,1 mesh to -0.5, 0.5 mesh values
+        vox[vox < - truncate] = -truncate
+        vox[vox > truncate] = truncate
+        np.save(str(outpath / 'voxels'), vox)
+          
+    if verbose: print(f'finished job {name}')
+    return points, rgb, occupancy
+
+def process_sample(inpath, outpath, verbose=False, num_points=100000, fraction=45/50, sigma=0.003, truncate=1.0, voxel_resolution=64):
+    if verbose: print(inpath,'\n',outpath)
     name = str(inpath).split('/')[-1]
     if verbose: print(f'starting sdf-job {name}')
-    points, rgb, sdf = process_sample_sdf(inpath, outpath, num_points, fraction, sigma)
+    points, sdf = process_sample_sdf(inpath, outpath, num_points, fraction, sigma)
 
     if verbose: print(f'starting rgb-job {name}')
     points_2, rgb_2, sdf_2 = process_sample_rgb(inpath, outpath, num_points)
+    rgb = copy_colors_nearest_neighbor(points_2, points, rgb_2)
 
     points = np.append(points,points_2).reshape(-1,3)
     rgb = np.append(rgb,rgb_2).reshape(-1,3)
     sdf = np.append(sdf,sdf_2)
 
     filename = str(outpath / 'point_samples')
-    np.savez(filename, points=points, rgb=rgb, sdf=sdf)
+
+    sdf[sdf > truncate] = truncate
+    sdf[sdf < -truncate] = -truncate
+    
+    #this turns sdf into occupancy
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0
+
+    udf = sdf.copy()
+    udf[sdf < 0] = -sdf[sdf<0]
+    udf[udf > truncate] = truncate
+
+    np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy, udf=udf)
+
+    if verbose: print(f'voxelizing')
+    vox = mesh_to_voxels(trimesh.load(inpath), voxel_resolution=voxel_resolution)
+    vox /= 2 #bring it from -1,1 mesh to -0.5, 0.5 mesh values
+    vox[vox < - truncate] = -truncate
+    vox[vox > truncate] = truncate
+    np.save(str(outpath / 'voxels'), vox)
 
     if verbose: print(f'finished job {name}')
+    return points, rgb, occupancy
 
 
 def process_sample_sdf(inpath, outpath, num_points, fraction, sigma):
     
-    mesh, transform_matrix = load_and_normalize_mesh(inpath, outpath)        
+    mesh, transform_matrix = load_and_normalize_mesh(inpath)        
     points, sdf = compute_sdf_from_mesh(mesh, num_points, fraction, sigma)
-    rgb = np.zeros_like(points)
 
     transform_txt = str(outpath / 'transform.txt')
     np.savetxt(transform_txt, transform_matrix) 
     
-    return points, rgb, sdf
+    return points, sdf
+
+def copy_colors_nearest_neighbor(col_points, nocol_points, rgb_col, k=2):
+    tree = KDTree(col_points, leaf_size=35)  
+    dist, ind = tree.query(nocol_points, k)
+    rgb_nocol = np.zeros_like(nocol_points)
+    
+    #linear
+    #for i in range(k):
+    #    rgb_nocol += rgb_col[ind[:,i]]
+    #rgb_nocol = np.round(rgb_nocol/k)
+
+    #quadratic --> looks better? https://sighack.com/post/averaging-rgb-colors-the-right-way
+    rgb_nocol += np.sum(rgb_col[ind]*rgb_col[ind],axis=1)
+    rgb_nocol = np.sqrt( rgb_nocol / k)
+    return rgb_nocol 
+
 
 
 def process_sample_rgb(inpath, outpath, num_points):  
@@ -47,21 +229,38 @@ def process_sample_rgb(inpath, outpath, num_points):
     points, rgb, sdf = points_from_ply_xyzrgb(cc_path)
     return points, rgb, sdf
 
+def read_names(inpath=None):
+    if inpath is None: inpath = '../data/ShapeNetCore.v2/names.txt'
+    id_dict = {}
+    with open(inpath, 'r') as f:
+        textbody = f.readlines()
+        for line in textbody:
+            line = line.strip()
+            id, name = line[:8], line[9:]
+            id_dict[f'{name}'] = id
+    return id_dict
+
+def process_samples(source_path, outpath, category):
+    source_path = Path(source_path)
+    id_dict = read_names()
+    category_path = id_dict[f'{category}']
+    scenes_folders = glob.glob(str(source_path / category_path / "**"))
+    scenes_folders = sorted([folder.split("/")[-1] for folder in scenes_folders])
+    pass
 
 #helpers
 def cc_extract_colored_pc(filepath, outpath, num_points):
-    #command = "CloudCompare -O "+filepath
-    
-    #os.system('cmd /k f{command}') #k to remain, c to close
-    #result = subprocess.check_output(['sudo','service','mpd','restart'])
-    # samples colored pointcloud from textured mesh and saves it as ply in ascii format (3xslower than binary, 3sec per mesh)
     transform = str(outpath / 'transform.txt')
     output_mesh = str(outpath / 'norm.obj')
     output_ply = str(outpath / 'norm.ply')
-    subprocess.run(['CloudCompare','-SILENT','-o',filepath,'-AUTO_SAVE','OFF','-APPLY_TRANS',transform,'-SAMPLE_MESH','POINTS',f'{num_points}','-C_EXPORT_FMT','PLY','-M_EXPORT_FMT','OBJ','-SAVE_CLOUDS', 'FILE',output_ply,'-SAVE_MESHES','FILE',output_mesh])#, capture_output=True)#,    ])
+    subprocess.run(['CloudCompare','-SILENT','-o',filepath,'-AUTO_SAVE','OFF','-APPLY_TRANS',transform,'-SAMPLE_MESH','POINTS',f'{num_points}','-C_EXPORT_FMT','PLY','-M_EXPORT_FMT','OBJ','-SAVE_CLOUDS', 'FILE',output_ply,'-SAVE_MESHES','FILE',output_mesh], stdout=DEVNULL, stderr=DEVNULL)#, capture_output=True)#,    ])
     return output_ply
-    #subprocess.run(['CloudCompare','-SILENT','-o',filepath,'-APPLY_TRANS',transform,'-SAMPLE_MESH','POINTS','100000','-C_EXPORT_FMT','PLY','-PLY_EXPORT_FMT','ASCII','-SAVE_CLOUDS', 'FILE',out_path])#, capture_output=True)#,    ])
 
+def cc_norm_mesh(filepath, outpath):
+    transform = str(outpath / 'transform.txt')
+    output_mesh = str(outpath / 'norm.obj')
+    subprocess.run(['CloudCompare','-SILENT','-o',filepath,'-AUTO_SAVE','OFF','-APPLY_TRANS',transform,'-M_EXPORT_FMT','OBJ','-SAVE_MESHES','FILE',output_mesh], stdout=DEVNULL, stderr=DEVNULL)#, capture_output=True)#,    ])
+    
 
 def points_from_ply_xyzrgb(filename, out_path=None):
     with open(filename, 'rb') as f:
@@ -86,7 +285,7 @@ def points_from_ply_xyzrgb(filename, out_path=None):
 
 
 def compute_sdf_from_mesh(mesh, num_points, fraction, sigma):
-    points, sdf = sample_sdf_near_surface(mesh, number_of_points=num_points, sign_method='normal', surface_point_method='scan', sphere_radius=np.sqrt(2), surface_sample_frac=fraction, sigma=sigma)
+    points, sdf = sample_sdf_near_surface(mesh, number_of_points=num_points, sign_method='depth', surface_point_method='scan', sphere_radius=np.sqrt(2), surface_sample_frac=fraction, sigma=sigma)
     translation, scale = compute_unit_sphere_transform(mesh)
     points = (points / scale) - translation
     sdf /= scale
@@ -108,23 +307,352 @@ def compute_unit_sphere_transform(mesh):
     return translation, scale
 
 
-def load_and_normalize_mesh(filepath, out_path):
+def load_and_normalize_mesh(filepath):
     mesh = trimesh.load_mesh(filepath)
+    
     normalizing = 1/(mesh.extents).max()
     centering = -mesh.centroid
-    mesh.apply_translation(centering)
-    mesh.apply_scale(normalizing)
-
+    
     # 4x4 transformation matrix in homogeneous coordinates
     T = np.eye(4)*normalizing
     T[:3,3] = centering*normalizing
     T[3,3] = 1
+
+    mesh.apply_transform(T)
     return mesh, T
+
+def category_processor(category, inpath='../data/ShapeNetCore.v2', outpath='../data/processed', offset=0, sigma=0.003, truncate=0.2, num_points=100000, visualize=False, voxel_resolution=64):
+    inpath = Path(inpath)
+    outpath = Path(outpath)
+    id_dict = read_names()
+    cat_id = id_dict[category]
+    
+    names = sorted(glob.glob(str(f'{inpath}/{cat_id}/*/models/model_normalized.obj')))
+
+    if isinstance(offset, int):
+        names = names[offset:]
+        print(len(names),'samples remaining')
+    elif isinstance(offset, list):
+        print(len(names) - offset[0],'samples remaining') 
+        names = [names[i] for i in offset]
+        offset = offset[0]
+    
+    for i, item in enumerate(names):
+        print(i+offset, datetime.datetime.now())
+        out_folder = Path(outpath / category / str(i+offset).zfill(5))
+        out_folder.mkdir(exist_ok=True, parents=True)
+        with open(out_folder / 'name.txt', 'w') as f:
+            f.write(item)
+
+        points, rgb, occupancy = process_sample_v3(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
+        
+        if visualize:
+            pointcloud = np.concatenate((points, rgb), axis=-1)
+            visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder/'pointcloud_in.obj')
+            visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder/'pointcloud_out.obj')
+
+
+def list_model_ids(inpath='../data/processed', shapenet_class='car', save=True):
+    inpath = Path(inpath)
+    inpath = inpath / f'{shapenet_class}'
+    names = sorted(glob.glob(str(inpath / '*' / 'name.txt')))
+    model_dict = {}
+    for idx, name in enumerate(names):
+        with open(name, 'r') as f:
+            text = f.readlines()[0]
+            name = text.replace('/models/model_normalized.obj','').split('/')[-1]
+            model_dict[idx] = name
+
+    if save:
+        with open(str(inpath / 'model_ids.txt'), 'w') as out:
+            for key in model_dict.keys():
+                out.writelines(str(key)+' '+str(model_dict[key]) + '\n')
+    else: return model_dict
+
+
+def fix_sampling_sdf(inpath='../data/processed', shapenet_class='car', save=True, offset=0):
+    inpath = Path(inpath)
+    inpath = inpath / f'{shapenet_class}'
+    names = sorted(glob.glob(str(inpath / '*' / 'point_samples_new.npz')))
+
+    if isinstance(offset, int):
+        names = names[offset:]
+    elif isinstance(offset, list): 
+        names = [names[i] for i in offset]
+        offset = offset[0]
+
+    for name in names:
+        print(name.split('/')[-2])
+        npz = np.load(name)
+        points = npz['points']
+        rgb = npz['rgb']
+        out_folder = name.replace('point_samples_new.npz', '')
+        mesh_path = out_folder + 'norm.obj'
+        mesh = trimesh.load(mesh_path)
+        mesh = mesh.dump().sum()
+        verts = mesh.vertices
+        faces = mesh.faces
+
+        sdf = mesh_to_sdf(mesh, points, sign_method='depth')
+        if np.count_nonzero(sdf < 0) < 40000:
+            print('not enough inside points for sdf_to_mesh:depth')
+            #sdf_igl, _, _ = igl.signed_distance(points, verts, faces)
+            #if np.count_nonzero(sdf_igl < 0) < 40000:
+            #    
+            #    print('not enough inside points for igl either')
+
+            #honestly might just have to delete faulty meshes
+            sdf_2 = mesh_to_sdf(mesh, points)
+            if np.count_nonzero(sdf < sdf_2): sdf = sdf_2
+            else: pass
+            #else: sdf=sdf_igl
+
+        filename = out_folder + 'point_samples_fix.npz'
+        
+        truncate = 0.1
+        sdf[sdf > truncate] = truncate
+        sdf[sdf < -truncate] = -truncate
+        
+        #this turns sdf into occupancy
+        occupancy = np.zeros_like(sdf)
+        occupancy[sdf <= 0] = 1
+        occupancy[sdf > 0] = 0
+
+        udf = sdf.copy()
+        udf[sdf < 0] = -sdf[sdf<0]
+        udf[udf > truncate] = truncate
+
+        np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy, udf=udf)
+        pointcloud = np.concatenate((points, rgb), axis=-1)
+        visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder + 'pointcloud_in.obj')
+        visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder + 'pointcloud_out.obj')
+
+
+def category_processor_blender(category, inpath='../data/processed', outpath='../data/processed', offset=0, sigma=0.003, truncate=0.2, num_points=100000, visualize=False, voxel_resolution=64):
+    inpath = Path(inpath)
+    outpath = Path(outpath)
+
+    id_dict = read_names()
+    cat_id = id_dict[category]
+    
+    names = sorted(glob.glob(str(f'{inpath}/{cat_id}/*/models/model_normalized.obj')))
+    #print(names)
+    
+    if isinstance(offset, int):
+        names = names[offset:]
+        print(len(names),'samples remaining')
+    elif isinstance(offset, list):
+        print(len(names) - offset[0],'samples remaining') 
+        names = [names[i] for i in offset]
+        offset = offset[0]
+    
+    for i, item in enumerate(names):
+        print(i+offset, datetime.datetime.now())
+        out_folder = Path(outpath / category / str(i+offset).zfill(5))
+        out_folder.mkdir(exist_ok=True, parents=True)
+        with open(out_folder / 'name.txt', 'w') as f:
+            f.write(item)
+        
+        #item = rel-path to norm.obj
+        points, rgb, occupancy = process_sample_blender(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
+        
+        if visualize:
+            pointcloud = np.concatenate((points, rgb), axis=-1)
+            visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder/'pointcloud_in.obj')
+            visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder/'pointcloud_out.obj')
+
+
+def process_sample_blender(item, out_folder, sigma, truncate, num_points, voxel_resolution):
+    mesh = trimesh.load(item)
+
+    images_path = str(out_folder).split('/')[:-1]
+    images_path = '/'.join(images_path) + '/'
+
+    #load mesh in trimesh, normalize it, save it, render it
+    mesh, transform_matrix = load_and_normalize_mesh(item) 
+    transform_txt = str(out_folder / 'transform.txt')
+    np.savetxt(transform_txt, transform_matrix) 
+
+    cc_norm_mesh(item, out_folder)
+    render_blender(str(out_folder)+'/norm.obj', out_folder)
+    unproj_pts = reproject_blender(out_folder)
+
+    rndarray = np.random.randint(0, unproj_pts.shape[0], size=(num_points,))
+    partial_unproj_points = unproj_pts[rndarray]
+
+    opoints, orgb = partial_unproj_points[...,:3], partial_unproj_points[...,3:]
+    newpts, newptsrnd = add_noise(opoints, sigma)
+
+    noisy_rgb = copy_colors_nearest_neighbor(opoints, newpts, orgb, k=5)
+    rgb_rnd = copy_colors_nearest_neighbor(opoints, newptsrnd, orgb, k=5)
+
+    pts = np.append(newpts, newptsrnd).reshape(-1,3).astype(np.float32)
+    rgb = np.append(noisy_rgb,rgb_rnd).reshape(-1,3).astype(np.float32)
+
+    sdf = mesh_to_sdf(mesh, pts)
+    if np.count_nonzero(sdf < 0) < 20000:
+        print('not enough inside points for camera, trying sdf_to_mesh:depth')
+        sdf_2 = mesh_to_sdf(mesh, pts, sign_method='depth')
+        if np.count_nonzero(sdf < sdf_2): sdf = sdf_2
+        else: pass
+
+    if np.any(mesh.centroid > 0.1):
+        print('possibly erroneous mesh, not centered')
+    #points_outside = points[points > mesh.bounds[1] or points < mesh.bounds[0]]
+    #set all sdf for outside points to |sdf|
+    sdf[np.any(pts > mesh.bounds[1],axis=1)] = np.abs(sdf[np.any(pts > mesh.bounds[1],axis=1)])
+    sdf[np.any(pts < mesh.bounds[0],axis=1)] = np.abs(sdf[np.any(pts < mesh.bounds[0],axis=1)])
+
+    sdf[sdf > truncate] = truncate
+    sdf[sdf < -truncate] = -truncate
+
+    udf = np.absolute(sdf)
+
+    #this turns sdf into occupancy
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0  
+
+    filename = str(out_folder / 'point_samples_blender')
+    np.savez(filename, points=pts, rgb=rgb, sdf=sdf.astype(np.float32), occupancy=occupancy.astype(np.float32), udf=udf.astype(np.float32))
+
+    filename_exr = str(out_folder) + '/_r_336.exr'
+    image = pyexr.read(filename_exr)
+    image = rgba2rgb(image)
+    image = (image-image.min())/(image.max()-image.min())*2-1
+    imsave(filename_exr.replace('exr','png'), img_as_ubyte(image))
+
+    if voxel_resolution > 0:
+        vox = mesh_to_voxels(mesh, voxel_resolution=voxel_resolution)
+        vox /= 2 #bring it from -1,1 mesh to -0.5, 0.5 mesh values
+        vox[vox < - truncate] = -truncate
+        vox[vox > truncate] = truncate
+        np.save(str(out_folder / 'voxels'), vox)
+          
+    return pts, rgb, occupancy
+
+def render_blender(inpath, outpath, format='OPEN_EXR'):
+    #inpath ='/media/alex/SSD Datastorage/data/processed/car/00000/norm.obj'
+    #outpath = '../data/blender/car/'
+    if format == 'OPEN_EXR':
+        cdepth = 16
+    else: cdepth = 8 
+    subprocess.run(['blender','--background','--python','data_processing/render_blender.py','--','--output_folder',f'{outpath}',f'{inpath}','--format',f'{format}','--color_depth',f'{cdepth}'], stdout=DEVNULL, stderr=DEVNULL)#, capture_output=True)#,    ])
+    
+
+def reproject_blender(inpath):
+    #path = '/media/alex/SSD Datastorage/data/blender/00000/'
+    path = str(inpath)
+    idx = path.split('/')[-2]
+    f = 245
+
+    unproj_points = np.array([])
+
+    for i in range(30):
+        rgb_img = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}.exr').astype(np.float32)
+        rgb_img = rgb_img[...,:3]/3
+        depthmap = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}_depth0001.exr').astype(np.float32)[...,0]
+        RT = np.loadtxt(path+f'/RT{str((i)*12).zfill(3)}.txt').astype(np.float32)
+
+        R_b2CV = np.array([[-1,0,0],[0,0,-1],[0,1,0]], dtype=np.float32)
+
+        R = RT[:3,:3]
+        T = RT[:3, 3]
+
+        xyz = depth_to_camera(-depthmap, f, 112,112).transpose(1,0)
+        
+        #load rgb color for pointcloud
+        rgb_image = rgb_img.reshape(-1,3)
+        
+        #filter non-surface points (depth > 65500)
+        mask = depthmap.flatten()
+        rgb_image = rgb_image[np.nonzero(mask < 65500), :].reshape(-1,3)    
+        xyz = xyz[np.nonzero(mask < 65500), :].reshape(-1,3)
+        
+        #transform back into world coordinates from view
+        xyz = (R.transpose(1,0) @ xyz.transpose(1,0)).transpose(1,0)
+        xyz = xyz + (R.transpose(1,0) @ np.expand_dims(T,0).transpose(1,0)).squeeze()
+        xyz = (R_b2CV @ xyz.transpose(1,0)).transpose(1,0)
+        
+        xyz_out = np.concatenate((xyz.squeeze(), rgb_image), axis=-1)
+        unproj_points = np.append(unproj_points, xyz_out).reshape(-1,6)
+    
+    return unproj_points
+
+def depth_to_camera(depth_map, f=245, cx=112, cy=112):
+    v, u = np.meshgrid(np.arange(depth_map.shape[-2]), np.arange(depth_map.shape[-1]))
+    X = -np.multiply(v, depth_map)/f + cx * depth_map/f 
+    Y = -np.multiply(u, depth_map)/f + cy * depth_map/f 
+    Z = depth_map
+    return np.stack((X.flatten(), Y.flatten(), Z.flatten())) 
+
+def check_remaining():
+    g1 = sorted(glob.glob('../data/processed/car/*/point_samples_fix.npz'))
+    g2 = sorted(glob.glob('../data/processed/car/*/rgb00.png'))
+    g1b = ['/'.join(g.split('/')[:-1]) for g in g1]
+    g2b = ['/'.join(g.split('/')[:-1]) for g in g2]
+    g1c = set(g1b)
+    g2c = set(g2b)
+    remaining = sorted(list(g1c-g2c))
+    print(len(remaining), remaining)
 
 
 if __name__ == '__main__':
-    inpath = Path('/media/alex/SSD Datastorage/data/processed/overfit/car/85f6145747a203becc08ff8f1f541268/models/model_normalized.obj')
-    outpath = Path('test/police_car')
+    #do this with argparse
+    from util.arguments import argparse
+    from util.visualize import visualize_rgb_pointcloud
+    
+    from util.bookkeeping import list_model_ids
+    from util.visualize import render_shapenet
+    import warnings
+    warnings.filterwarnings('ignore')
+
+    parser = argparse.ArgumentParser(
+        description="""Creates pointcloud samples with 45parts sigma stddev,
+                        45parts 10*sigma stddev and 10 parts sqrt(2) uniform sampling.
+                        UDF and SDF are truncated to truncate value"""
+    )
+
+    parser.add_argument('--inpath', type=str, default='../data/ShapeNetCore.v2')
+    parser.add_argument('--outpath', type=str, default='../data/blender')
+    parser.add_argument('--truncate', type=float, default=0.1)
+    parser.add_argument('--sigma', type=float, default=0.003)
+    parser.add_argument('--num_points', type=int, default=200000)
+    parser.add_argument('--category', type=str, default='car')
+    parser.add_argument('--offset', type=int, default=3500)
+    parser.add_argument('--voxel_resolution', type=int, default=64)
+    parser.add_argument('--visualize', type=bool, default=True)    
+
+    args = parser.parse_args()
+
+    inpath = Path(args.inpath)
+    outpath = Path(args.outpath)
+    truncate = args.truncate
+    sigma = args.sigma
+    category = args.category
+    offset = args.offset
+    num_points = args.num_points
+    voxel_resolution = args.voxel_resolution
+    visualize = args.visualize
+
     outpath.mkdir(exist_ok=True, parents=True)
+    id_dict = list_model_ids(save=True)
     print('processing')
-    process_sample(inpath, outpath, verbose=True)
+    #fix_sampling_sdf(offset=offset) 
+    #
+    offset = [i for i in range(3400,3500)]
+    #render_blender('a','b')    
+    #offset = [i+5 for i in range(1)]
+    #check_remaining()
+    # DELETED: 1377, 704, 2663, 2906
+    category_processor_blender(category=category, inpath=inpath, outpath=outpath, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize)
+
+    #category_processor(category=category, inpath=inpath, outpath=outpath, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize)
+
+    """
+    for i in range(len(id_dict.keys())):
+        try: render_shapenet(id_dict, idx=i+offset)
+        except IndexError:
+            print(i+offset,'Index Error')
+        except RuntimeError:
+            print(i+offset,'Memory Error')"""
