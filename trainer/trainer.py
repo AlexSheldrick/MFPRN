@@ -119,31 +119,24 @@ class ImplicitTrainer(pl.LightningModule):
             # reproject points or render pointcloud --> l2 loss on visible points
             # // OR // compare rgb to pixel values of subsampled indices (if the assumption holds that we stay on same raster)
             #try option2 here:
-            #subsampled_pixels = batch['image'].permute(0, 2, 3, 1).reshape(batch['image'].shape[0], -1, 3) #swap points and channels
-            #subsampled_pixels = subsampled_pixels[batch['depth_idx'], 0]#.reshape(-1,2000,3)
-
-            #rgb_surface_loss = torch.nn.functional.l1_loss(rgb_surface, subsampled_pixels)
+            subsampled_pixels = batch['image'].permute(0, 2, 3, 1).reshape(batch['image'].shape[0], -1, 3) #swap points and channels
+            subsampled_pixels = [subsampled_pixels[i, batch['depth_idx'][i]] for i in range(batch['depth_idx'].shape[0])]#.reshape(-1,2000,3)
+            subsampled_pixels = torch.stack([subsampled_pixels[i] for i in range(batch['depth_idx'].shape[0])], axis=0)
+            rgb_surface_loss = torch.nn.functional.l1_loss(rgb_surface, subsampled_pixels)
             # enforce norm grad = 1
             #rgb loss needs pointcloud rendering
             #sdf should be zero on surface
             sdf_surface_loss = torch.nn.functional.l1_loss(sdf_surface, torch.zeros_like(sdf_surface))
             # eikonal loss
             grad_lambda = 0.1 #this is a hyperparameter
-            grad_loss = ((sdf_grad.norm(2, dim=-1) - 1) ** 2).mean()
-            self.log(f'{mode}_grad_loss', grad_loss)
+            #grad_loss = ((sdf_grad.norm(2, dim=-1) - 1) ** 2).mean()
+            #self.log(f'{mode}_grad_loss', grad_loss)
             self.log(f'{mode}_sdf_surface_loss', sdf_surface_loss)
+            self.log(f'{mode}_rgb_surface_loss', rgb_surface_loss)
             if 'train' in mode:
-                loss = loss + grad_lambda*grad_loss
+                #loss = loss + grad_lambda*grad_loss
                 loss = loss + grad_lambda*sdf_surface_loss
-                #loss = loss + grad_lambda*rgb_surface_loss
-
-        """if self.hparams.fieldtype == 'sdf' and 'train' in mode:
-            # eikonal loss
-            grad_lambda = 0.1 #this is a hyperparameter
-            sdf_gradient = gradient(batch['points'], sdf)            
-            grad_loss = ((sdf_gradient.norm(2, dim=-1) - 1) ** 2).mean()
-            self.log(f'{mode}_grad_loss', grad_loss)
-            loss += grad_lambda*grad_loss"""
+                loss = loss + grad_lambda*rgb_surface_loss
         
         #self.log_dict({f'{self.hparams.fieldtype}_loss': sdf_loss})    (f'{self.hparams.fieldtype}_loss', sdf_loss)
         self.log(f'{mode}_{self.hparams.fieldtype}_loss', sdf_loss)
