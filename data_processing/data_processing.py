@@ -20,6 +20,7 @@ import pyexr
 from skimage.io import imsave
 from skimage import img_as_ubyte
 from skimage.color import rgba2rgb
+import math
 
 
 #open all the relevant paths (glog, pathlib)
@@ -518,8 +519,8 @@ def process_sample_blender(item, out_folder, sigma, truncate, num_points, voxel_
 
     filename_exr = str(out_folder) + '/_r_336.exr'
     image = pyexr.read(filename_exr)
+    image[...,:3] = (image[...,:3]-image[...,:3].min())/(image[...,:3].max()-image[...,:3].min())
     image = rgba2rgb(image)
-    image = (image-image.min())/(image.max()-image.min())*2-1
     imsave(filename_exr.replace('exr','png'), img_as_ubyte(image))
 
     if voxel_resolution > 0:
@@ -538,7 +539,69 @@ def render_blender(inpath, outpath, format='OPEN_EXR'):
         cdepth = 16
     else: cdepth = 8 
     subprocess.run(['blender','--background','--python','data_processing/render_blender.py','--','--output_folder',f'{outpath}',f'{inpath}','--format',f'{format}','--color_depth',f'{cdepth}'], stdout=DEVNULL, stderr=DEVNULL)#, capture_output=True)#,    ])
+
+def reproject_image(image, depthmap, RT=None, f=245, cx = 112, cy = 112):
+    #depth 65000 and the coord transform is only for blender images
+
+    xyz = depth_to_camera(-depthmap, f, cx, cy).transpose(1,0)
     
+    #filter non-surface points (depth > 65500)
+    mask = depthmap.flatten() 
+    xyz = xyz[np.nonzero(mask < 65500), :].reshape(-1,3)
+    
+    if RT is not None:
+        R = RT[:3,:3]
+        T = RT[:3, 3]
+    
+        #transform back into world coordinates from view
+        xyz = (R.transpose(1,0) @ xyz.transpose(1,0)).transpose(1,0)
+        xyz = xyz + (R.transpose(1,0) @ np.expand_dims(T,0).transpose(1,0)).squeeze()
+
+        #Bring from blender coordinates to CV convention
+        R_b2CV = np.array([[-1,0,0],[0,0,-1],[0,1,0]], dtype=np.float32)
+        xyz = (R_b2CV @ xyz.transpose(1,0)).transpose(1,0).squeeze() 
+
+    if image is not None:
+        #add color to the pointcloud via image
+        rgb_image = image.reshape(-1,3)
+        rgb_image = rgb_image[np.nonzero(mask < 65500), :].reshape(-1,3)   
+        xyz = np.concatenate((xyz, rgb_image), axis=-1)
+    
+    return xyz
+
+def generate_frustum(image_size, intrinsic_inv, depth_min, depth_max):
+    x = image_size[0]
+    y = image_size[1]
+    eight_points = np.array([[0 * depth_min, 0 * depth_min, depth_min, 1.0],
+                             [0 * depth_min, y * depth_min, depth_min, 1.0],
+                             [x * depth_min, y * depth_min, depth_min, 1.0],
+                             [x * depth_min, 0 * depth_min, depth_min, 1.0],
+                             [0 * depth_max, 0 * depth_max, depth_max, 1.0],
+                             [0 * depth_max, y * depth_max, depth_max, 1.0],
+                             [x * depth_max, y * depth_max, depth_max, 1.0],
+                             [x * depth_max, 0 * depth_max, depth_max, 1.0]]).transpose()
+    frustum = np.dot(intrinsic_inv, eight_points)
+    frustum = frustum.transpose()
+    return frustum[:, :3]
+
+def generate_frustum_volume(frustum, voxelsize):
+    maxx = np.max(frustum[:, 0]) / voxelsize
+    maxy = np.max(frustum[:, 1]) / voxelsize
+    maxz = np.max(frustum[:, 2]) / voxelsize
+    minx = np.min(frustum[:, 0]) / voxelsize
+    miny = np.min(frustum[:, 1]) / voxelsize
+    minz = np.min(frustum[:, 2]) / voxelsize
+
+    dimX = math.ceil(maxx - minx)
+    dimY = math.ceil(maxy - miny)
+    dimZ = math.ceil(maxz - minz)
+    camera2frustum = np.array([[1.0 / voxelsize, 0, 0, -minx],
+                               [0, 1.0 / voxelsize, 0, -miny],
+                               [0, 0, 1.0 / voxelsize, -minz],
+                               [0, 0, 0, 1.0]])
+
+    return (dimX, dimY, dimZ), camera2frustum
+
 
 def reproject_blender(inpath):
     #path = '/media/alex/SSD Datastorage/data/blender/00000/'
@@ -549,33 +612,15 @@ def reproject_blender(inpath):
     unproj_points = np.array([])
 
     for i in range(30):
+        #load inputs per image
         rgb_img = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}.exr').astype(np.float32)
         rgb_img = rgb_img[...,:3]/3
         depthmap = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}_depth0001.exr').astype(np.float32)[...,0]
         RT = np.loadtxt(path+f'/RT{str((i)*12).zfill(3)}.txt').astype(np.float32)
 
-        R_b2CV = np.array([[-1,0,0],[0,0,-1],[0,1,0]], dtype=np.float32)
+        xyz = reproject_image(rgb_img, depthmap, RT=RT, f=245, cx = 112, cy = 112)
 
-        R = RT[:3,:3]
-        T = RT[:3, 3]
-
-        xyz = depth_to_camera(-depthmap, f, 112,112).transpose(1,0)
-        
-        #load rgb color for pointcloud
-        rgb_image = rgb_img.reshape(-1,3)
-        
-        #filter non-surface points (depth > 65500)
-        mask = depthmap.flatten()
-        rgb_image = rgb_image[np.nonzero(mask < 65500), :].reshape(-1,3)    
-        xyz = xyz[np.nonzero(mask < 65500), :].reshape(-1,3)
-        
-        #transform back into world coordinates from view
-        xyz = (R.transpose(1,0) @ xyz.transpose(1,0)).transpose(1,0)
-        xyz = xyz + (R.transpose(1,0) @ np.expand_dims(T,0).transpose(1,0)).squeeze()
-        xyz = (R_b2CV @ xyz.transpose(1,0)).transpose(1,0)
-        
-        xyz_out = np.concatenate((xyz.squeeze(), rgb_image), axis=-1)
-        unproj_points = np.append(unproj_points, xyz_out).reshape(-1,6)
+        unproj_points = np.append(unproj_points, xyz).reshape(-1,6)
     
     return unproj_points
 

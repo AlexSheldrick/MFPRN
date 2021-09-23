@@ -2,6 +2,9 @@ import numpy as np
 import trimesh
 from pykdtree.kdtree import KDTree
 from data_processing.implicit_waterproofing import implicit_waterproofing
+from util.visualize import render_mesh
+import pyexr
+from skimage.color import rgba2rgb
 
 # taken from ifnet: https://github.com/jchibane/if-net/blob/master/data_processing/evaluation.py
 ## mostly apdopted from occupancy_networks/im2mesh/common.py and occupancy_networks/im2mesh/eval.py
@@ -118,6 +121,50 @@ def distance_p2p(pointcloud_pred, pointcloud_gt,
 
     return dist, normals_dot_product
 
+def l1_loss(images_1, images_2, pixel_average=True):
+    # expects (batch, h, w, c) inputs
+    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*images_1.shape[3]
+    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]
+    
+    channelwise_l1_loss = (np.abs(images_1-images_2))
+    mean_l1_img_loss = np.sum(channelwise_l1_loss)/normalization
+    if not pixel_average: return channelwise_l1_loss
+    return mean_l1_img_loss
+
+def l2_loss(images_1, images_2, pixel_average=True):
+    # expects (batch, h, w, c) inputs
+    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*images_1.shape[3]
+    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]
+    
+    channelwise_l2_loss = np.sqrt( ((images_1[...,0] - images_2[...,0])**2) + 
+                                   ((images_1[...,1] - images_2[...,1])**2) + 
+                                   ((images_1[...,2] - images_2[...,2])**2)
+                                 )
+    if not pixel_average: return channelwise_l2_loss
+    mean_L2_img_loss = np.sum(channelwise_l2_loss)/normalization
+    return mean_L2_img_loss
+
+def pixelwise_loss(predicted_mesh_path, gt_files_path, num_images = 30, pixel_average = True):
+    elevation = np.arctan(0.6/1)/np.pi*180
+    rendered_images = np.empty((num_images, 224,224, 3))
+    prerendered_images = np.empty((num_images, 224,224, 3))
+
+    for i in range(num_images):
+        image = render_mesh(predicted_mesh_path, elevation=elevation, start=i)
+        rendered_images[i] = image.cpu().numpy()[...,:3]
+        
+        sample_idx = str(i*12).zfill(3)
+        pyexr_img = pyexr.read(f'{gt_files_path}/_r_{sample_idx}.exr')
+        pyexr_img[...,:3] = pyexr_img[...,:3]/3
+        pyexr_img = rgba2rgb(pyexr_img)
+        
+        prerendered_images[i] = pyexr_img
+
+    L1 = l1_loss(rendered_images, prerendered_images, pixel_average=pixel_average)
+    L2 = l2_loss(rendered_images, prerendered_images, pixel_average=pixel_average)
+
+    return L1, L2
+
 if __name__ == "__main__":
     from pathlib import Path
     import glob
@@ -127,49 +174,42 @@ if __name__ == "__main__":
         description='Split Data'
     )
 
-    parser.add_argument('--path_files', type=str, default='results/path_files/')    
-    parser.add_argument('--experiment', type=str, default='425_results.txt')
+    parser.add_argument('--experiment', type=str, default='/media/alex/SSD Datastorage/guided-research/runs/occupancy/01091710_Ablation3_hybrid_singleconvx4_nofreeze/epoch=107-val_loss=0.6125.ckpt')
+    parser.add_argument('--GT_path', type=str, default='/media/alex/SSD Datastorage/data/blender/car')
     parser.add_argument('--verbose', dest='verbose', action='store_true', help='verbose')
+    parser.add_argument('--pixelloss', dest='pixelloss', action='store_true', help='verbose')
     
     args = parser.parse_args()
     
     #prepare mesh_pathes to read and evaluate
-    results_pth = Path("results")
-    path_files = Path(args.path_files)
-
-    gt_path = path_files / "normed_gt.txt"
-    predicted_path = path_files / args.experiment
-
-    with open(str(predicted_path),'r') as file:
-        paths_predicted = file.read().splitlines()
-
-    with open(str(gt_path),'r') as file:
-        paths_gt = file.read().splitlines()
-
-    #define variables
-    experiment_name = "exp_" + args.experiment
-    experiment_results = paths_predicted
-    gt_path = paths_gt
+    #point to experiment, read all folders, compare to folders of GT
+    predicted_meshes_paths = glob.glob(args.experiment + '/*[!.txt]') #points to #mesh for predicted mesh
+    exp_idx = [predicted_meshes_paths[i].split('/')[-1] for i in range(len(predicted_meshes_paths))] #mesh
+    GT_path = args.GT_path
 
     ###evaluation here  
     #define dict
-    performance = {'completeness': [], 'accuracy': [],'normals completeness': [],'normals accuracy': [], 'normals': [], 'completeness2': [], 'accuracy2': [], 'chamfer_l2': [], 'iou': []}
+    performance = {'completeness': [], 'accuracy': [],'normals completeness': [],'normals accuracy': [], 'normals': [], 'completeness2': [], 'accuracy2': [], 'chamfer_l2': [], 'iou': [], 'pixel_L1':[], 'pixel_L2':[]}
     names = []
 
     #evaluate meshes
-    for i in range(len(experiment_results)):
+    for i, idx in enumerate(exp_idx):
         #read meshes
         if args.verbose:
-            print('reading mesh: '+str(i)+'/'+str(len(experiment_results))+' with names:'+experiment_results[i]+' '+gt_path[i])
+            print(f'evaluating mesh: {idx} at {predicted_meshes_paths[i]}')
 
-        pred_mesh = trimesh.load(str(experiment_results[i]))
-        gt_mesh = trimesh.load(str(gt_path[i]))
+        pred_mesh = trimesh.load(f'{predicted_meshes_paths[i]}/mesh.obj')
+        gt_mesh = trimesh.load(f'{GT_path}/{idx}/manifold_norm.obj')
         out_dict = eval_mesh(pred_mesh, gt_mesh, -0.5, 0.5, n_points=100000)
-        name = experiment_results[i].split('/')[-1].lstrip('val_').rstrip('_predicted_normed.obj')
-        names.append(name)
+        names.append(idx)
+        
+        #pixelwise loss
+        L1, L2 = pixelwise_loss(f'{predicted_meshes_paths[i]}/mesh.obj', f'{GT_path}/{idx}')        
 
-        for key in performance.keys():
+        for key in out_dict.keys():
             performance[key].append(out_dict[key])
+        performance['pixel_L1'].append(L1)
+        performance['pixel_L2'].append(L2)
     
     #sort meshes according to iou for cherry picking and failure cases
     ious = performance['iou']
@@ -177,7 +217,7 @@ if __name__ == "__main__":
     sorted_ious = np.around(sorted(ious), decimals=3)
 
     #write file
-    with open(str(results_pth/experiment_name), 'w') as file:
+    with open(f'{args.experiment}/results.txt', 'w') as file:
         n = len(performance['completeness'])
         file.write(str(n)+' meshes'+'\n')
         for key in performance.keys():

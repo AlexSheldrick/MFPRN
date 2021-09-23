@@ -1,6 +1,8 @@
+from data_processing.data_processing import reproject_image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import grad
 
 from pytorch3d.renderer import (
     look_at_view_transform,
@@ -16,6 +18,8 @@ from pytorch_lightning import LightningModule
 
 import math
 import trimesh
+import numpy as np
+
 
 
 args = arguments.parse_arguments()
@@ -29,10 +33,11 @@ args = arguments.parse_arguments()
 
 class SimpleNetwork(LightningModule):
 
-    def __init__(self, hparams, hidden_dim=256):
+    def __init__(self, hparams, hidden_dim=512):
         super(SimpleNetwork, self).__init__()
         self.save_hyperparameters(hparams)
-        
+        self.freeze_pretrained = hparams.freeze_pretrained
+
         self.embedding = GaussFourierEmbedding(3, self.hparams.coordinate_embedding_size[0], self.hparams.coordinate_embedding_scale[0])
         self.embedding_sdf = GaussFourierEmbedding(1, int(self.hparams.coordinate_embedding_size[1]), self.hparams.coordinate_embedding_scale[1])
 
@@ -58,33 +63,34 @@ class SimpleNetwork(LightningModule):
             feature_size = (1 + 64 + 128 + 128) * 7
 
         if self.hparams.encoder == 'conv2d_pretrained_projective':
-            self.feature_extractor = PreTrainedFeatureExtractor2D_projective()
+            self.feature_extractor = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
              
             feature_size = 256 + point_embedding_size
 
         if self.hparams.encoder == 'hybrid':
-            self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective()
+            self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
             self.feature_extractor_3d = Conv3dFeatureExtractor(16,32,64,128)
             feature_size = point_embedding_size + 128 + 256
 
         if self.hparams.encoder == 'hybrid_ifnet':
-            self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective()
+            self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
             self.feature_extractor_3d = IFNetFeatureExtractor(32, 64, 128, 128)
             feature_size = point_embedding_size + (1 + 64 + 128 + 128) + 256
 
-
+        #3,4,6 added
         self.lin1 = nn.Linear(feature_size, hidden_dim)
-        #self.lin2 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, hidden_dim)
         #self.lin3 = nn.Linear(hidden_dim , hidden_dim)
         #self.lin4 = nn.Linear(hidden_dim, hidden_dim)
-        #self.lin5 = nn.Linear(feature_size + hidden_dim, hidden_dim)
+        self.lin5 = nn.Linear(feature_size + hidden_dim, hidden_dim)
         #self.lin6 = nn.Linear(hidden_dim, hidden_dim)
-        #self.lin7 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin7 = nn.Linear(hidden_dim, hidden_dim)
         self.lin8 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin9 = nn.Linear(feature_size + sdf_embedding, hidden_dim)
         self.lin_sdf = nn.Linear(hidden_dim, 1)
-        self.lin_rgb = nn.Linear(hidden_dim + sdf_embedding, 3)
-        #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin_sdf, self.lin_rgb]
-        layers = [self.lin1, self.lin8, self.lin_sdf, self.lin_rgb]
+        self.lin_rgb = nn.Linear(hidden_dim, 3)
+        #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
+        layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
         for layer in layers:
             torch.nn.utils.weight_norm(layer)
         # Linear: 
@@ -94,8 +100,14 @@ class SimpleNetwork(LightningModule):
         # consider using nn.ReLU6()
 
     def forward(self, batch):
+        
         voxels = batch['voxels']
         image = batch['image']
+
+        #This should rotate points to view
+        #R, T = batch['camera'][...,:3,:3], batch['camera'][...,:3,3]
+        #points = batch['points'].clone().detach()
+        #batch['points'] = rotate_world_to_view(points, R, T)
 
         if self.hparams.encoder == 'ifnet':
             features = self.feature_extractor(batch['points'], voxels) # features: (B, features, 1,7,sample_num) 
@@ -113,7 +125,7 @@ class SimpleNetwork(LightningModule):
         elif self.hparams.encoder == 'hybrid':
             features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features) 
             points = self.embedding(batch['points'])
-            features_3d = self.feature_extractor_3d(batch['points'], image, voxels)
+            features_3d = self.feature_extractor_3d(voxels)
             features_3d = features_3d.transpose(-1,-2)
             features_3d = features_3d.expand(-1, points.shape[1], -1)
             features = torch.cat((features_2d, features_3d, points), axis=-1) #(bs, num_points, features_2d(256) + features_3d(128) + 2*embedding_size)
@@ -143,13 +155,13 @@ class SimpleNetwork(LightningModule):
             features = torch.cat((features, points), axis=-1) #(bs, 14*14+3, num_points)
         
         out = self.actvn(self.lin1(features))
-        #out = self.actvn(self.lin2(out))
+        out = self.actvn(self.lin2(out))
         #out = self.actvn(self.lin3(out))
         #out = self.actvn(self.lin4(out))
-        #out = torch.cat((out, features), axis=-1)
-        #out = self.actvn(self.lin5(out))
+        out = torch.cat((out, features), axis=-1)
+        out = self.actvn(self.lin5(out))
         #out = self.actvn(self.lin6(out))
-        #out = self.actvn(self.lin7(out))
+        out = self.actvn(self.lin7(out))
         out = self.actvn(self.lin8(out))
         sdf = self.lin_sdf(out)
         
@@ -158,9 +170,9 @@ class SimpleNetwork(LightningModule):
 
         #rgb = self.embedding_rgb(torch.cat((batch['points'], sdf), axis=-1))
         rgb = self.embedding_sdf(sdf)
-        out = torch.cat((out, rgb), axis=-1)
+        rgb = torch.cat((features, rgb), axis=-1)
+        rgb = self.actvn(self.lin9(rgb))
         rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze())
-        #rgb = torch.nn.Sigmoid()(self.lin_rgb(out)).squeeze()*255
 
         return sdf.squeeze(-1), rgb
 
@@ -197,7 +209,7 @@ class Conv3dFeatureExtractor(LightningModule):
         #self.pool = nn.MaxPool3d(2)
         self.pool = nn.AvgPool3d(2)
         self.actvn = nn.ReLU()
-        self.actvn_out = nn.Linear(4*4*4, 1, 1)
+        self.actvn_out = nn.Linear(8*8*8, 1)
 
         layers = [self.conv1, self.conv2, self.conv3, self.conv4, self.actvn_out]
         for layer in layers:
@@ -210,13 +222,13 @@ class Conv3dFeatureExtractor(LightningModule):
         self.conv4_bn = nn.BatchNorm3d(f4)
         """
     
-    def forward(self, points, image, voxels):
+    def forward(self, voxels):
         """
         out = self.maxpool(self.conv1_bn(self.actvn(self.conv1(voxels)))) #in 64³, out:32³
         out = self.maxpool(self.conv2_bn(self.actvn(self.conv2(out)))) #out 16³
         out = self.maxpool(self.conv3_bn(self.actvn(self.conv3(out)))) #out 8³
         out = self.maxpool(self.conv4_bn(self.actvn(self.conv4(out)))) #out 4³ x 128 = 64² features
-        """
+        
         out = self.actvn(self.conv1(voxels)) #in 64³, out:32³
         out = self.pool((self.actvn(self.conv1_1(out))))
 
@@ -228,7 +240,12 @@ class Conv3dFeatureExtractor(LightningModule):
 
         out = self.actvn(self.conv4(out)) #out 4³ x 128 = 64² features
         out = self.pool((self.actvn(self.conv4_4(out))))
-        
+        """
+        out = self.pool((self.actvn(self.conv1(voxels))))
+        out = self.pool((self.actvn(self.conv2(out))))
+        out = self.pool((self.actvn(self.conv3(out))))
+        out = self.pool((self.actvn(self.conv4(out))))
+
         out = torch.flatten(out, start_dim=2)
         out = self.actvn_out(out) #-> 64 features
         return out
@@ -275,9 +292,8 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
     # where H and W are expected to be at least 224. The images have to be loaded in to a range of [0, 1] and then normalized using 
     # mean = [0.485, 0.456, 0.406] and std = [0.229, 0.224, 0.225].
 
-    def __init__(self):
+    def __init__(self, freeze_pretrained=None):
         super(PreTrainedFeatureExtractor2D_projective, self, ).__init__()
-        self.image_size = torch.tensor([[224,224]], device='cuda:0')
         self.pretrained = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50_fast_2s1x64d', pretrained=True)
         #self.layers = torch.nn.Sequential(*(list(torch.hub.load('zhanghang1989/ResNeSt', 'resnest50_fast_2s1x64d', pretrained=True).children())[:-1]))
         
@@ -286,20 +302,29 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
         self.layer3 = torch.nn.Sequential(*(list(self.pretrained.children())[5:6]))
         self.layer4 = torch.nn.Sequential(*(list(self.pretrained.children())[6:7]))
         self.layer5 = torch.nn.Sequential(*(list(self.pretrained.children())[7:-1]))
-        self.decoder1 = torch.nn.Linear(3+64+256+512+1024+2048, 256)
-        """layers = [self.layer1, self.layer2, self.layer3, self.layer4, self.layer5]
-        #layers = [self.layer1, self.layer2, self.layer3]
-        for layer in layers:
-            for child in layer.children():
-                for param in child.parameters():
-                    param.requires_grad = False"""
+        self.decoder1 = torch.nn.Linear(3+64+256+512+1024+2048, 256)        
+        layers = [self.layer1, self.layer2, self.layer3, self.layer4, self.layer5]
         
+        if freeze_pretrained:
+            for layer in layers:
+                #don't unfreeze BatchNorm
+                if isinstance(layer, nn.BatchNorm2d):
+                    for child in layer.children():
+                        for param in child.parameters():
+                            param.requires_grad = False
+
+            #only retrain highlevel representations
+            for layer in layers[freeze_pretrained:]:
+                for child in layer.children():
+                    for param in child.parameters():
+                        param.requires_grad = False
+            
 
     def forward(self, points, images, camera):
 
         R, T = camera[...,:3,:3], camera[...,:3,3]
         points = rotate_world_to_view(points, R, T)
-        projected_points = project_3d_to_2d_gridsample(points, 245, 112, 112)
+        projected_points = project_3d_to_2d_gridsample(points, 245, 112, 112) #could load/use an intrinsics file here
 
         projected_points = projected_points.unsqueeze(1) #points are now x,y within (-1, 1)
         feature_0 = F.grid_sample(images, projected_points) #(BS, 3, 1, 1) features: #BS,C, 1,numpoints -> 2, 256, 1, numpoints
@@ -449,10 +474,10 @@ class GaussFourierEmbedding(LightningModule):
         
     def forward(self, x):
         
-        with torch.no_grad():
-            if self._B is None: return x
-            #x = torch.cat([a * torch.sin((2.*torch.pi*x) @ self._B.T), a * torch.cos((2.*torch.pi*x) @ self._B.T)], axis=-1) / torch.linalg.norm(a)
-            x = torch.cat([torch.sin((2.*math.pi*x) @ self._B.T), torch.cos((2.*math.pi*x) @ self._B.T)], axis=-1)
+        #with torch.no_grad():
+        if self._B is None: return x
+        #x = torch.cat([a * torch.sin((2.*torch.pi*x) @ self._B.T), a * torch.cos((2.*torch.pi*x) @ self._B.T)], axis=-1) / torch.linalg.norm(a)
+        x = torch.cat([torch.sin((2.*math.pi*x) @ self._B.T), torch.cos((2.*math.pi*x) @ self._B.T)], axis=-1)
     
         return x
 
@@ -534,3 +559,83 @@ def implicit_rgb_only(network, batch, obj_path, output_path):
     faces = mesh.faces
     rgb = evaluate_network_rgb(network, batch, vertices)
     make_col_mesh(vertices, faces, rgb, output_path)
+
+def gradient(inputs, outputs):
+    d_points = torch.ones_like(outputs, requires_grad=False, device=outputs.device)
+    points_grad = grad(
+        outputs=outputs,
+        inputs=inputs,
+        grad_outputs=d_points,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True)[0][:, -3:]
+    return points_grad
+
+#
+# SAL Geometric init proposed by Atzmon et al. 2020 
+def sal_init(m):
+    if type(m) == nn.Linear:
+        if hasattr(m, 'weight'):
+            std = np.sqrt(2) / np.sqrt(nn.init_calculate_correct_fan(m.weight, 'fan_out'))
+
+            with torch.no_grad():
+                m.weight.normal_(0., std)
+        if hasattr(m, 'bias'):
+            m.bias.data.fill_(0.0)
+
+#last layer
+def sal_init_last_layer(m):
+    if hasattr(m, 'weight'):
+        val = np.sqrt(np.pi) / np.sqrt(nn.init_calculate_correct_fan(m.weight, 'fan_in'))
+        with torch.no_grad():
+            m.weight.fill_(val)
+    if hasattr(m, 'bias'):
+        m.bias.data.fill_(0.0)
+
+#### render-implicit-surface with 1 gradient step
+# reproject depth map +/- epsilon
+# evaluate sdf on grid around points. Worst case 7 points need to be evaluated (p, p+x, p-x, p+z, p-z, p+y, p-y)
+# evaluate gradient-field via finite differences, from each point pi, take 1 step
+# step: p_i_surface = p_i + sdf(p_i) * norm(grad(p_i, p_i+x ....))
+# evaluate network on all points p_i_surface for RGB (and sdf for debugging)
+# reproject pointcloud into image plane or render this pointcloud differentially
+# l2 loss for all pixels that contain projected surface point
+# for debugging: load network with checkpoint for forward passes etc.
+
+def determine_implicit_surface(model, batch): #Could do this in forward pass already but don't have supervision
+    #is cloning necessary
+    probe = batch
+    #if we keep track of indicies we might save reprojection and rendering, can just compare rgb vals
+    # add x,y,z deviations with central difference theorem
+    epsilon = 1e-6
+    probe['points'] = shift_points(batch['depthpoints'], epsilon)
+    sdf, _ = model(probe)
+    # gradient 
+    sdf_grad = finite_differences_gradient(sdf, epsilon)
+    # take 1 gradient step, should land on surface
+    num_points = probe['points'].shape[1]//4
+    surface_points = probe['points'][:,:num_points] - sdf[:,:num_points,None] * sdf_grad
+    probe['points'] = surface_points 
+    #re-evaluate model for rgb and sdf on implicit surface
+    sdf_surface, rgb_surface = model(probe)
+    return sdf_surface, rgb_surface, sdf_grad #, subsample_indices
+
+def finite_differences_gradient(points, epsilon = 1e-6):
+    with torch.no_grad():
+        #structure is points(0:num_points --> base points, num_points:2*num_points --> x_shifted points etc.)
+        num_points = points.shape[1] // 4
+        grad_x =(points[...,:num_points] - points[...,num_points:2*num_points]) / epsilon
+        grad_y =(points[...,:num_points] - points[...,2*num_points:3*num_points]) / epsilon
+        grad_z =(points[...,:num_points] - points[...,3*num_points:]) / epsilon
+        gradxyz = torch.cat((grad_x.unsqueeze(-1), grad_y.unsqueeze(-1), grad_z.unsqueeze(-1)), axis=-1)
+    return gradxyz
+
+def shift_points(points, epsilon):
+    with torch.no_grad():
+        #structure is points(0:num_points --> base points, num_points:2*num_points --> x_shifted points etc.)
+        x_shifted = points + torch.tensor([epsilon,0,0], device=points.device)[None,None,:]
+        y_shifted = points + torch.tensor([0,epsilon,0], device=points.device)[None,None,:]
+        z_shifted = points + torch.tensor([0,0,epsilon], device=points.device)[None,None,:]
+        shifted_points = torch.cat((points, x_shifted, y_shifted, z_shifted), axis=1)
+    return shifted_points
+

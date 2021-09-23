@@ -1,6 +1,8 @@
 import mcubes as mc
 import numpy as np
 from pytorch3d.renderer.cameras import FoVOrthographicCameras
+from pytorch3d.renderer.lighting import AmbientLights
+from pytorch3d.renderer.materials import Materials
 import trimesh
 from PIL import Image
 from pathlib import Path
@@ -17,7 +19,7 @@ from pytorch3d.datasets import (ShapeNetCore)
 from pytorch3d.renderer import (
     look_at_view_transform,
     FoVPerspectiveCameras, 
-    PointLights, 
+    PointLights,
     RasterizationSettings, 
     MeshRenderer, 
     MeshRasterizer,  
@@ -26,7 +28,7 @@ from pytorch3d.renderer import (
     HardFlatShader
 )
 
-def render_mesh(obj_filename, outpath=None):
+def render_mesh(obj_filename, outpath=None, viewangle = None, cull_backfaces = False, elevation=None, start=None):
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
         torch.cuda.set_device(device)
@@ -38,6 +40,7 @@ def render_mesh(obj_filename, outpath=None):
     faces = torch.from_numpy(faces).unsqueeze(0).to(device)
 
     verts_cv = verts.detach().clone()
+    
     verts_cv[...,0] = -verts[...,0]
     verts_cv[...,2] = -verts[...,2]
 
@@ -47,41 +50,82 @@ def render_mesh(obj_filename, outpath=None):
     
     textures = TexturesVertex(verts_features=rgb)
     mesh = Meshes(verts, faces, textures)
-    batchsize=4
-    meshes = mesh.extend(batchsize)
-    lastpt = 360 - 360/batchsize - 60
-    azim = torch.linspace(-60, lastpt, batchsize)
-    R, T = look_at_view_transform(1.7, 20, azim)
 
+    if viewangle is not None and elevation is None:
+        batchsize=4
+        elevation = np.arctan(0.6/1)*180/np.pi
+    
+        lastpt = 360 - 360/batchsize - 60
+        azim = torch.linspace(-60, lastpt, batchsize)
+
+        R, T = look_at_view_transform(1, 20, azim)
+        #30.963756 is atan(0.6/1.0) in ° (which correlates to the angle from Blender rendering)
+        Rview, Tview = look_at_view_transform(1, elevation, viewangle)
+        R, T = torch.cat((Rview, R), axis=0),  torch.cat((Tview, T), axis=0)
+        batchsize += 1
+    
+    elif elevation is not None:
+        steps=30
+        batchsize=1
+        lastpt = 360/steps*(batchsize*(1+start)-1)
+        azim = torch.linspace(360*batchsize*(start)/steps, lastpt, batchsize)
+        R, T = look_at_view_transform(1, elevation, azim)
+
+    meshes = mesh.extend(batchsize)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
 
     raster_settings = RasterizationSettings(
         image_size=224, 
-        blur_radius=0.0, 
-        faces_per_pixel=3, 
+        blur_radius=0.0001, 
+        faces_per_pixel=3,
+        cull_backfaces = False, 
         max_faces_per_bin=300000,
-        perspective_correct=True
+        perspective_correct=True,        
     )
-    lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+    #lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+    #this supposedly fixes triangular artifacts
+    location = torch.tensor([0.0, 0.0, -3.0])#.repeat(batch_size,1)
+    location = R @ location
+
+    lights = PointLights(
+        device=device, 
+        location=location,
+        ambient_color=((1, 1, 1),), 
+        diffuse_color=((0, 0, 0),),
+        specular_color=((0, 0, 0),),
+    )
 
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
             cameras=cameras, 
             raster_settings=raster_settings
         ),
-        shader=HardFlatShader(
+        shader=SoftPhongShader(
             device=device, 
             cameras=cameras,
             lights=lights
         )
     )
-    images = renderer(meshes)
+
+    materials = Materials(
+        device=device,
+        specular_color=[[1.0, 1.0, 1.0]],
+        shininess=100.0
+    )
+    images = renderer(meshes, lights=lights, materials=materials, cameras=cameras)
     
     if outpath is not None:
-        for i in range(batchsize):
-            visualize_implicit_rgb(images[i], outpath+str(i))
+        if start is None:
+            for i in range(batchsize):
+                visualize_implicit_rgb(images[i], outpath+str(i))
+        else:
+            visualize_implicit_rgb(images[0], outpath+str(start))
 
     return images
+
+#for pixelwise loss:
+#render model_prediction under equal circumstances
+
 
 def render_shapenet(shapenet_id_dict, outpath='../data/processed/car', idx=0, batchsize = 12, distance=1.2, verbose=True):
     #shapenet_idx is a tuple (idx, id)
@@ -110,13 +154,22 @@ def render_shapenet(shapenet_id_dict, outpath='../data/processed/car', idx=0, ba
 
     raster_settings = RasterizationSettings(
         image_size=224, 
-        blur_radius=0.0, 
-        faces_per_pixel=3, 
-        cull_backfaces=True,
+        blur_radius=0.0001, 
+        faces_per_pixel=3,
+        cull_backfaces = False, 
         max_faces_per_bin=300000,
-        perspective_correct=True
+        perspective_correct=True,        
     )
-    lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+
+    location = torch.tensor([0.0, 0.0, -3.0])#.repeat(batch_size,1)
+    location = R @ location
+    lights = PointLights(
+        device=device, 
+        location=location,
+        ambient_color=((1, 1, 1),), 
+        diffuse_color=((0, 0, 0),),
+        specular_color=((0, 0, 0),),
+    )
     
     #this line uses a modified MeshRenderer (replaced MeshRenderer with MeshRendererWithFragments in ShapeNet Dataset Base Class)
     images, fragments = shapenet_dataset.render(
@@ -228,7 +281,10 @@ def make_col_mesh(verts, faces, rgb, outpath):
     if verts.size > 0:         
         #min max norm might not give authentic colors
         #rgb = ((rgb - rgb.min())/(rgb.max() - rgb.min())*255).astype(np.uint8)
-        if np.all(rgb >= -1) and np.all(rgb<= 1): rgb = (255*(rgb/2 + 0.5)).astype(np.uint8) #from (-1,1) to (0,1)
+        
+        if np.all(rgb>=0) and np.all(rgb<=1): rgb = (255*(rgb)).astype(np.uint8) #this if rgb €[0,1] --> #from (-1,1) to (0,1)
+        elif np.all(rgb >= -1) and np.all(rgb<= 1): rgb = (255*(rgb/2 + 0.5)).astype(np.uint8)  #this if rgb €[-1,1] --> from (-1,1) to (0,1)
+
         else: 
             print('vertex colors out of range')
             rgb = ((rgb - rgb.min())/(rgb.max() - rgb.min())*255).astype(np.uint8)
