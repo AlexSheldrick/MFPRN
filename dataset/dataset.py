@@ -3,23 +3,26 @@ from torchvision import transforms
 import torch
 from pathlib import Path
 import numpy as np
+from numpy.linalg import inv
 import pyexr
 from skimage.color import rgba2rgb
 from data_processing.data_processing import reproject_image, generate_frustum, generate_frustum_volume
+#from scipy import stats
+import fast_histogram
 
 torch.manual_seed(17)
 
 class ImplicitDataset(Dataset):
 
     def __init__(self, split, dataset_path, splitsdir, hparams=None, transform = None):
-        
+        if hparams.precision == 32: self.precision = np.float32
+        else: self.precision = np.float16
         self.hparams = hparams
-        self.intrinsic = torch.tensor(  
+        self.intrinsic = np.array(  
             [[245       ,   0.       ,   122,  0.],
             [  0.       , 245        ,   122,  0.],
             [  0.       ,   0.       ,   1. ,  0.],
-            [  0.       ,   0.       ,   0. ,  1.]]
-                                    )
+            [  0.       ,   0.       ,   0. ,  1.]])
         self.transform = transform
         self.clamp = self.hparams.clamp
         self.dataset_path = Path(dataset_path)
@@ -38,17 +41,14 @@ class ImplicitDataset(Dataset):
         sample_folder = Path(item)
 
         sample_idx = str(np.random.randint(0,30)*12).zfill(3)
-        
-        #image = torch.tensor(get_image(sample_folder / f'rgb{sample_idx}.png')).permute(2, 0, 1) # (224xH,224xW,3xC) --> (3C, 224xH, 224xW)
-        #depth = torch.tensor(get_image(sample_folder / f'depth{sample_idx}.png')).unsqueeze(2).permute(2, 0, 1) # (224xH,224xW,1xC) --> (1C, 224xH, 224xW)
-
         points, rgb, sdf = self.prepare_points(sample_folder)
-        
-        #only send depth if necessary
-        depth = torch.empty((1,1))
+        surface_points, surface_rgb, surface_sdf = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = 500)
+        #surface_points = surface_points + surface_points * torch.normal(mean=0, std=1e-4, size = (surface_points.shape[0], 1), requires_grad=False)
+        #surface_points, surface_rgb = None, None
 
         #load image and depth map
         image = pyexr.read(str(sample_folder / f'_r_{sample_idx}.exr'))
+        image[...,:3] = image[...,:3]/3
         depth = pyexr.read(str(sample_folder / f'_r_{sample_idx}_depth0001.exr'))[...,0]
         
         #deprecated, using dynamic voxel grid now
@@ -62,26 +62,24 @@ class ImplicitDataset(Dataset):
             occvoxel[voxels > 0] = 0
             voxels = occvoxel"""
 
-        camera = np.loadtxt(sample_folder / f'RT{sample_idx}.txt').astype(np.float32)
-        
-        
-        ud_flip = np.array([[1, 0, 0],[0,-1,0],[0,0,1]], dtype=np.float32)
-        lr_flip = np.array([[-1, 0, 0],[0,1,0],[0,0,1]], dtype=np.float32)
-        
+        camera = np.loadtxt(sample_folder / f'RT{sample_idx}.txt').astype(self.precision)
         #fx = 245, fy=245, cx = 112, cy = 112
-
+        
+        ud_flip = np.array([[1, 0, 0],[0,-1,0],[0,0,1]], dtype=self.precision)
+        lr_flip = np.array([[-1, 0, 0],[0,1,0],[0,0,1]], dtype=self.precision)
+        
         #apply transforms for train:
         if 'train' in self.split:
             
             #Generate random number to decide for each individual augmentation
-            p = torch.rand(10)
+            p = np.random.rand(10)
             threshhold = self.hparams.aug_threshhold
             
             #random backgrounds
             white = np.array([1,1,1])
             background = white
             if ('Background' in self.transform) and (p[0] >= threshhold):
-                background =  p[:3]
+                background = p[:3]
 
             #Remove alpha channel
             image = rgba2rgb(image, background = background)
@@ -91,26 +89,20 @@ class ImplicitDataset(Dataset):
                 brightness = np.random.uniform(low=0.8, high=1.2, size=1)
                 image[np.all(image != white, axis=2)] *= brightness
                 rgb *= brightness
+                if surface_rgb is not None: surface_rgb *= brightness
             
             if ('ColorJitter' in self.transform) and (p[2] >= threshhold):
                 jitter = np.random.uniform(low=-0.1, high=0.1, size=(3))
                 image[np.all(image != white, axis=2)] += jitter
                 rgb +=  jitter
+                if surface_rgb is not None: surface_rgb +=  jitter
 
             if ('ColorPermute' in self.transform) and (p[3] >= threshhold):
-                image2 = image.copy()
-                rands = np.random.permutation([0,1,2])
+                roll_int = np.random.randint(1,3)
+                image = np.roll(image, roll_int, axis=-1)
+                rgb = torch.roll(rgb, roll_int, dims=-1)     
+                if surface_rgb is not None: surface_rgb = torch.roll(surface_rgb, roll_int, dims=-1)     
 
-                image[...,rands[0]] = image2[...,rands[2]]
-                image[...,rands[1]] = image2[...,rands[0]]
-                image[...,rands[2]] = image2[...,rands[1]]
-
-                rgb2 = rgb.clone().detach()
-                rgb[...,rands[0]] = rgb2[...,rands[2]]
-                rgb[...,rands[1]] = rgb2[...,rands[0]]
-                rgb[...,rands[2]] = rgb2[...,rands[1]]            
-
-            #do voxels need to be flipped??
             if ('HorizontalFlip' in self.transform) and (p[4] >= threshhold):
                 image = np.ascontiguousarray(np.fliplr(image))
                 camera[:3,:3] = lr_flip @ camera[:3,:3]  # ORDER MATTERS
@@ -120,7 +112,6 @@ class ImplicitDataset(Dataset):
                 image = np.ascontiguousarray(np.flipud(image))
                 camera[:3,:3] = ud_flip @ camera[:3,:3]
                 depth = np.ascontiguousarray(np.flipud(depth))
-
             
             if ('Rotation' in self.transform) and (p[6] >= threshhold): #rotation around viewing direction == +z
                 pass
@@ -130,99 +121,105 @@ class ImplicitDataset(Dataset):
             #pixel distance? Voxel distance?
             
         if image.shape[-1] == 4: image = rgba2rgb(image)
-        image[...,:3] = (image[...,:3]-image[...,:3].min())/(image[...,:3].max()-image[...,:3].min())
-
-        # dynamic voxel grid:
-        # load image & depthmap
-        # reproject points
-        # frustrum??
+        #image[...,:3] = (image[...,:3]-image[...,:3].min())/(image[...,:3].max()-image[...,:3].min())
 
         # get camera space to grid space transform
-        intrinsic_inv = torch.inverse(self.intrinsic)
+        num_voxels = self.hparams.num_voxels
+        voxel_size = np.round(1/num_voxels + 0.005, decimals=2)
+        intrinsic_inv = (inv(self.intrinsic))
         frustum = generate_frustum([244, 244], intrinsic_inv, -0.5, 0.5)
-        dims, camera2frustum = generate_frustum_volume(frustum, 0.01) #voxel size?
+        dims, camera2frustum = generate_frustum_volume(frustum, voxel_size)
 
         # depth from camera to grid space
-        xyz = reproject_image(image, depth, RT=camera, f=245, cx=112, cy=112)[...,:3]
+        rgbxyz = reproject_image(image, depth, RT=camera, f=245, cx=112, cy=112)
+        rgbdots = rgbxyz[...,3:]
+        xyz = rgbxyz[...,:3]        
 
-        depth_idx = np.random.randint(0, xyz.shape[0], 2000) #if we keep track of indicies we might save reprojection and rendering, can just compare rgb vals
-        depthpoints = xyz[depth_idx].reshape(depth_idx.shape[-1],3)
-
-        #keep track of filtered pixels
-        rgb_idx = np.arange(depth.shape[0]*depth.shape[1])
-        rgb_idx = rgb_idx[np.nonzero(depth.flatten() < 65500)]
-        #the rgb pixels corresponding to subsampled & projected points
-        depth_idx = rgb_idx[depth_idx]
-    
         coords = np.concatenate([xyz, np.ones((xyz.shape[0], 1))], axis=-1)
-        depth_in_gridspace = (camera2frustum @ coords.transpose(1,0))[:3, :].transpose(1,0).reshape(-1, 3)
+        pts_grid = (camera2frustum @ coords.transpose(1,0))[:3, :].transpose(1,0).reshape(-1, 3) #depth_points_in_gridspace
 
-        voxels = np.zeros((128,)*3)
-        to_int = lambda x: np.round(x).astype(np.int32)
-        
-        #turn this into a density grid of image points
-        voxels[to_int(depth_in_gridspace[:, 0]), to_int(depth_in_gridspace[:, 1]), to_int(depth_in_gridspace[:, 2])] += 1
-        voxels /= np.nanmax(voxels)
+        #very slow, replaced by histogramdd
+        """for i in range(pts_grid.shape[0]):
+            voxels[0, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += 1
+            voxels[1, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,0]
+            voxels[2, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,1]
+            voxels[3, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,2]"""
+        if self.hparams.voxel_type == 'colored_density':
+            #normalized density voxelgrid with mean-average color of points inside
+            voxels_occ = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
+            voxels_r = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,0])
+            voxels_g = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,1])
+            voxels_b = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,2])
+            voxels = np.stack((voxels_occ, voxels_r, voxels_g, voxels_b),axis=0)
+            voxels[1:, voxels[0] != 0] /= voxels[0, voxels[0] != 0]
+            voxels[0] /= np.nanmax(voxels[0])
+        elif self.hparams.voxel_type == 'density':
+            #normalized density voxelgrid
+            voxels = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
+            voxels /= np.nanmax(voxels)
+            voxels = voxels[np.newaxis, :]
+        elif self.hparams.voxel_type == 'occupancy':
+            #occuapncy voxelgrid (0,1)
+            voxels = np.zeros((1, num_voxels, num_voxels, num_voxels))
+            to_int = lambda x: np.round(x).astype(np.int32)
+            voxels[0, to_int(pts_grid[:, 0]), to_int(pts_grid[:, 1]), to_int(pts_grid[:, 2])] += 1
+            voxels[0] /= np.nanmax(voxels[0])
 
         #Do these transformations regardless of train/val/test --> ([0,1] normalization, axis permutation)
-        xyz_to_blender = np.array([[1, 0, 0],[0,0,-1],[0,1,0]], dtype=np.float32)
+        xyz_to_blender = np.array([[1, 0, 0],[0,0,-1],[0,1,0]], dtype=self.precision)
         camera[:3,:3] = camera[:3,:3] @ xyz_to_blender #bring it from blender space to pytorch3d space (z into image, righthanded)
 
-        
-        #we no longer need depth
-        #depth = torch.from_numpy(depth)
-        depth = torch.empty(1)
         image = torch.from_numpy(image).permute(2, 0, 1)
         camera = torch.from_numpy(camera)
-        voxels = torch.from_numpy(voxels.astype(np.float32)).unsqueeze(0)
-        depth_idx = torch.from_numpy(depth_idx).to(torch.long)
-        depthpoints = torch.from_numpy(depthpoints.astype(np.float32))
+        voxels = torch.from_numpy(voxels.astype(self.precision))
 
         #normalize RGB-Pointclouds to 0, 1
-        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())         
-
-        if self.hparams.encoder not in ('conv3d', 'ifnet', 'hybrid', 'hybrid_ifnet'):
+        #rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())         
+        
+        if self.hparams.encoder not in ('conv3d', 'ifnet', 'hybrid', 'hybrid_ifnet', 'hybrid_depthproject'):
             voxels = torch.empty(1)
 
-        if self.hparams.encoder in ('conv2d_pretrained', 'conv2d_pretrained_projective', 'hybrid', 'hybrid_ifnet') and self.hparams.freeze_pretrained is not None:
+        if self.hparams.encoder in ('conv2d_pretrained', 'conv2d_pretrained_projective', 'hybrid', 'hybrid_ifnet', 'hybrid_depthproject') and self.hparams.freeze_pretrained is not None:
             image = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))(image)
-
+        rgb = torch.cat((rgb, surface_rgb), dim=0)
+        sdf = torch.cat((sdf, surface_sdf), dim=0)
+        points = torch.cat((points, surface_points), dim=0)
+        #print(f'points: {points.shape}, rgb: {rgb.shape}, sdf: {sdf.shape}')
         return {
             'name': item,
             'camera': camera,
             'points': points,
             'rgb': rgb,
             'sdf': sdf,
-            'depth': depth,
             'image': image,
             'voxels': voxels,
             'sample_idx': sample_idx,
-            'depthpoints': depthpoints, 
-            'depth_idx': depth_idx
                     }
 
-    def prepare_points(self, sample_folder):
-        
+    def prepare_points(self, sample_folder, itemname = "fixed_point_samples_blender.npz", num_points = None):
+        if num_points is None:
+            num_points = self.hparams.num_points
+
         points, rgb, sdf = [], [], []
         
-        sample_points = np.load(sample_folder / "point_samples_blender.npz")
+        sample_points = np.load(sample_folder / itemname)
 
-        subsample_indices = np.random.randint(0, sample_points['points'].shape[0], self.hparams.num_points)
+        subsample_indices = np.random.randint(0, sample_points['points'].shape[0], num_points)
 
         points = sample_points['points'][subsample_indices]
         rgb = sample_points['rgb'][subsample_indices]
         sdf = sample_points[f'{self.hparams.fieldtype}'][subsample_indices]
-
-        points = torch.from_numpy(points.astype(np.float32)).reshape(-1,3)
-        rgb = torch.from_numpy(rgb.astype(np.float32)).reshape(-1,3)
-        sdf = torch.from_numpy(sdf.astype(np.float32))   
+        
+        points = torch.from_numpy(points.astype(self.precision)).reshape(-1,3)
+        rgb = torch.from_numpy(rgb.astype(self.precision)).reshape(-1,3)
+        sdf = torch.from_numpy(sdf.astype(self.precision))   
 
         return points, rgb, sdf
 
 
 def rotate_world_to_view(points, R, T):
     xyz_to_blender = np.array([[1, 0, 0],[0,0,-1],[0,1,0]])
-    R_b2CV = np.array([[-1,0,0],[0,-1,0],[0,0,1]], dtype=np.float32)
+    R_b2CV = np.array([[-1,0,0],[0,-1,0],[0,0,1]], dtype=self.precision)
     
     viewpoints = (R @ xyz_to_blender @ points.transpose(1,0)).transpose(1,0) + T
     viewpoints = (R_b2CV @ viewpoints.transpose()).transpose()

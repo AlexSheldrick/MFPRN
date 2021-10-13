@@ -12,7 +12,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_percentage', type=float, default=0.85)
     parser.add_argument('--val_percentage', type=float, default=0.1)
     parser.add_argument('--test_percentage', type=float, default=0.05)
-    parser.add_argument('--target_path', type=str, default="../data/splits/blender_full/")
+    parser.add_argument('--target_path', type=str, default="../data/splits/blender_full_fix/")
 
     parser.add_argument('--dataset_path', type=str, default="../data/blender/car")
 
@@ -23,8 +23,13 @@ if __name__ == '__main__':
     val_percentage = args.val_percentage
     test_percentage = args.test_percentage    
 
-    files = glob.glob(str(dataset_path / '*' / '_r_324.exr'))
-    
+    files = glob.glob(str(dataset_path / '*' / 'disn_mesh.obj'))
+    banlist = [131, 220, 634, 704, 854, 835, 804, 862, 865, 1090, 1941, 1979, 2483, 3109]
+    for idx in banlist:
+        for i, filepath in enumerate(files):
+            if str(idx) in filepath:
+                files.pop(i)
+
     num_samples = len(files)
 
     splitsdir = {'train':[], 'val':[], 'test':[]}
@@ -36,11 +41,11 @@ if __name__ == '__main__':
     splitsdir['train'] = files[:a]
     splitsdir['val'] = files[a:a+b]
     splitsdir['test'] = files[a+b:a+b+c]
-    splitsdir['test'] = splitsdir['val'][:10]
+    #splitsdir['test'] = splitsdir['val'][:10]
     
     target_path.mkdir(exist_ok=True, parents=True)
     
     for split in splitsdir.keys():
         with open(str(target_path / f"{split}.txt"), 'w') as split_file:
-            splitsdir[split] = '\n'.join(sorted(splitsdir[split])).replace('/_r_324.exr','')
+            splitsdir[split] = '\n'.join(sorted(splitsdir[split])).replace('/disn_mesh.obj','')
             split_file.writelines(splitsdir[split])

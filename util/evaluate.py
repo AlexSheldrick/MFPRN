@@ -169,12 +169,13 @@ if __name__ == "__main__":
     from pathlib import Path
     import glob
     import argparse
+    from tqdm import tqdm
 
     parser = argparse.ArgumentParser(
         description='Split Data'
     )
 
-    parser.add_argument('--experiment', type=str, default='/media/alex/SSD Datastorage/guided-research/runs/occupancy/01091710_Ablation3_hybrid_singleconvx4_nofreeze/epoch=107-val_loss=0.6125.ckpt')
+    parser.add_argument('--test', type=str, default='/media/alex/SSD Datastorage/guided-research/runs/occupancy/01091710_Ablation3_hybrid_singleconvx4_nofreeze/epoch=107-val_loss=0.6125.ckpt')
     parser.add_argument('--GT_path', type=str, default='/media/alex/SSD Datastorage/data/blender/car')
     parser.add_argument('--verbose', dest='verbose', action='store_true', help='verbose')
     parser.add_argument('--pixelloss', dest='pixelloss', action='store_true', help='verbose')
@@ -183,7 +184,7 @@ if __name__ == "__main__":
     
     #prepare mesh_pathes to read and evaluate
     #point to experiment, read all folders, compare to folders of GT
-    predicted_meshes_paths = glob.glob(args.experiment + '/*[!.txt]') #points to #mesh for predicted mesh
+    predicted_meshes_paths = glob.glob(args.test + '/*[!.txt]') #points to #mesh for predicted mesh
     exp_idx = [predicted_meshes_paths[i].split('/')[-1] for i in range(len(predicted_meshes_paths))] #mesh
     GT_path = args.GT_path
 
@@ -193,13 +194,13 @@ if __name__ == "__main__":
     names = []
 
     #evaluate meshes
-    for i, idx in enumerate(exp_idx):
+    for i, idx in enumerate(tqdm(exp_idx)):
         #read meshes
         if args.verbose:
             print(f'evaluating mesh: {idx} at {predicted_meshes_paths[i]}')
 
         pred_mesh = trimesh.load(f'{predicted_meshes_paths[i]}/mesh.obj')
-        gt_mesh = trimesh.load(f'{GT_path}/{idx}/manifold_norm.obj')
+        gt_mesh = trimesh.load(f'{GT_path}/{idx}/disn_mesh.obj')
         out_dict = eval_mesh(pred_mesh, gt_mesh, -0.5, 0.5, n_points=100000)
         names.append(idx)
         
@@ -217,7 +218,7 @@ if __name__ == "__main__":
     sorted_ious = np.around(sorted(ious), decimals=3)
 
     #write file
-    with open(f'{args.experiment}/results.txt', 'w') as file:
+    with open(f'{args.test}/results.txt', 'w') as file:
         n = len(performance['completeness'])
         file.write(str(n)+' meshes'+'\n')
         for key in performance.keys():

@@ -31,13 +31,12 @@ def add_noise(points, sigma):
     
     #randomize which index gets which noise added, but leave order unchanged
     rndindx = np.random.permutation(np.array(range(n)))
-    gt = int(0.2*n) 
-    fine = gt+int(0.395*n)
-    coarse = fine+int(0.4*n)
-    o,a,b,c = np.split(rndindx, [gt, fine, coarse])
+    fine = int(0.495*n)
+    coarse = fine+int(0.5*n)
+    a,b,c = np.split(rndindx, [fine, coarse])
 
     #points[o] += 0
-    points[a] += np.random.normal(0, 0.003, size=(points[gt:fine].shape))
+    points[a] += np.random.normal(0, 0.003, size=(points[:fine].shape))
     points[b] += np.random.normal(0, 0.02, size=(points[fine:coarse].shape))
     points[c] += np.random.normal(0, 0.08, size=(points[coarse:].shape))
     random_points = np.random.uniform(-1, 1, size=(points[coarse:].shape))
@@ -224,6 +223,22 @@ def copy_colors_nearest_neighbor(col_points, nocol_points, rgb_col, k=2):
     return rgb_nocol 
 
 
+def fix_surface_points(path):
+    #path = path.replace('disn_mesh.obj', '')
+    print(f'{datetime.datetime.now()}, reading {path}')
+    pts_npz = np.load(path+'/surface_points_blender.npz')
+    car = trimesh.load(path+'/disn_mesh.obj')    
+    filename = str(path +'/surface_points_blender.npz')
+
+    points = pts_npz['points']
+    rgb = pts_npz['rgb']
+    
+    sdf = mesh_to_sdf.mesh_to_sdf(car, points)
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0
+    
+    np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy)
 
 def process_sample_rgb(inpath, outpath, num_points):  
     cc_path = cc_extract_colored_pc(inpath, outpath, num_points)
@@ -322,36 +337,6 @@ def load_and_normalize_mesh(filepath):
     mesh.apply_transform(T)
     return mesh, T
 
-def category_processor(category, inpath='../data/ShapeNetCore.v2', outpath='../data/processed', offset=0, sigma=0.003, truncate=0.2, num_points=100000, visualize=False, voxel_resolution=64):
-    inpath = Path(inpath)
-    outpath = Path(outpath)
-    id_dict = read_names()
-    cat_id = id_dict[category]
-    
-    names = sorted(glob.glob(str(f'{inpath}/{cat_id}/*/models/model_normalized.obj')))
-
-    if isinstance(offset, int):
-        names = names[offset:]
-        print(len(names),'samples remaining')
-    elif isinstance(offset, list):
-        print(len(names) - offset[0],'samples remaining') 
-        names = [names[i] for i in offset]
-        offset = offset[0]
-    
-    for i, item in enumerate(names):
-        print(i+offset, datetime.datetime.now())
-        out_folder = Path(outpath / category / str(i+offset).zfill(5))
-        out_folder.mkdir(exist_ok=True, parents=True)
-        with open(out_folder / 'name.txt', 'w') as f:
-            f.write(item)
-
-        points, rgb, occupancy = process_sample_v3(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
-        
-        if visualize:
-            pointcloud = np.concatenate((points, rgb), axis=-1)
-            visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder/'pointcloud_in.obj')
-            visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder/'pointcloud_out.obj')
-
 
 def list_model_ids(inpath='../data/processed', shapenet_class='car', save=True):
     inpath = Path(inpath)
@@ -371,96 +356,45 @@ def list_model_ids(inpath='../data/processed', shapenet_class='car', save=True):
     else: return model_dict
 
 
-def fix_sampling_sdf(inpath='../data/processed', shapenet_class='car', save=True, offset=0):
-    inpath = Path(inpath)
-    inpath = inpath / f'{shapenet_class}'
-    names = sorted(glob.glob(str(inpath / '*' / 'point_samples_new.npz')))
-
-    if isinstance(offset, int):
-        names = names[offset:]
-    elif isinstance(offset, list): 
-        names = [names[i] for i in offset]
-        offset = offset[0]
-
-    for name in names:
-        print(name.split('/')[-2])
-        npz = np.load(name)
-        points = npz['points']
-        rgb = npz['rgb']
-        out_folder = name.replace('point_samples_new.npz', '')
-        mesh_path = out_folder + 'norm.obj'
-        mesh = trimesh.load(mesh_path)
-        mesh = mesh.dump().sum()
-        verts = mesh.vertices
-        faces = mesh.faces
-
-        sdf = mesh_to_sdf(mesh, points, sign_method='depth')
-        if np.count_nonzero(sdf < 0) < 40000:
-            print('not enough inside points for sdf_to_mesh:depth')
-            #sdf_igl, _, _ = igl.signed_distance(points, verts, faces)
-            #if np.count_nonzero(sdf_igl < 0) < 40000:
-            #    
-            #    print('not enough inside points for igl either')
-
-            #honestly might just have to delete faulty meshes
-            sdf_2 = mesh_to_sdf(mesh, points)
-            if np.count_nonzero(sdf < sdf_2): sdf = sdf_2
-            else: pass
-            #else: sdf=sdf_igl
-
-        filename = out_folder + 'point_samples_fix.npz'
-        
-        truncate = 0.1
-        sdf[sdf > truncate] = truncate
-        sdf[sdf < -truncate] = -truncate
-        
-        #this turns sdf into occupancy
-        occupancy = np.zeros_like(sdf)
-        occupancy[sdf <= 0] = 1
-        occupancy[sdf > 0] = 0
-
-        udf = sdf.copy()
-        udf[sdf < 0] = -sdf[sdf<0]
-        udf[udf > truncate] = truncate
-
-        np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy, udf=udf)
-        pointcloud = np.concatenate((points, rgb), axis=-1)
-        visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder + 'pointcloud_in.obj')
-        visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder + 'pointcloud_out.obj')
-
-
 def category_processor_blender(category, inpath='../data/processed', outpath='../data/processed', offset=0, sigma=0.003, truncate=0.2, num_points=100000, visualize=False, voxel_resolution=64):
     inpath = Path(inpath)
-    outpath = Path(outpath)
+    #outpath = Path(outpath)
 
-    id_dict = read_names()
-    cat_id = id_dict[category]
+    #id_dict = read_names()
+    #cat_id = id_dict[category]
     
-    names = sorted(glob.glob(str(f'{inpath}/{cat_id}/*/models/model_normalized.obj')))
+    #names = sorted(glob.glob(str(f'{inpath}/{cat_id}/*/models/model_normalized.obj')))
+    #names = sorted(glob.glob(str(f'{inpath}/car/*/disn_mesh.obj')))
     #print(names)
-    
-    if isinstance(offset, int):
+    item = f'{inpath}/disn_mesh.obj'
+    out_folder = inpath
+    print(f'processing {item}, {datetime.datetime.now()}')
+    """if isinstance(offset, int):
         names = names[offset:]
         print(len(names),'samples remaining')
     elif isinstance(offset, list):
         print(len(names) - offset[0],'samples remaining') 
         names = [names[i] for i in offset]
-        offset = offset[0]
+        offset = offset[0]"""
     
-    for i, item in enumerate(names):
-        print(i+offset, datetime.datetime.now())
-        out_folder = Path(outpath / category / str(i+offset).zfill(5))
-        out_folder.mkdir(exist_ok=True, parents=True)
-        with open(out_folder / 'name.txt', 'w') as f:
-            f.write(item)
-        
-        #item = rel-path to norm.obj
-        points, rgb, occupancy = process_sample_blender(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
-        
+    #for i, item in enumerate(names):
+    #print(i+offset, datetime.datetime.now())
+    #out_folder = Path(outpath / category / str(i+offset).zfill(5))
+    out_folder.mkdir(exist_ok=True, parents=True)
+    #with open(out_folder / 'name.txt', 'w') as f:
+    #    f.write(item)
+    
+    #item = rel-path to norm.obj
+    #points, rgb, occupancy = process_sample_blender(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
+    try:
+        points, rgb, occupancy = pointcloud_fixed(item, out_folder, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution)
         if visualize:
             pointcloud = np.concatenate((points, rgb), axis=-1)
-            visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder/'pointcloud_in.obj')
-            visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder/'pointcloud_out.obj')
+            visualize_rgb_pointcloud(pointcloud[occupancy == 1], out_folder/'fixed_pointcloud_in.obj')
+            visualize_rgb_pointcloud(pointcloud[occupancy == 0], out_folder/'fixed_pointcloud_out.obj')
+    except:
+        print(f'{inpath} has not compiled')
+    
 
 
 def process_sample_blender(item, out_folder, sigma, truncate, num_points, voxel_resolution):
@@ -498,7 +432,7 @@ def process_sample_blender(item, out_folder, sigma, truncate, num_points, voxel_
         else: pass
 
     if np.any(mesh.centroid > 0.1):
-        print('possibly erroneous mesh, not centered')
+        print(f'possibly erroneous mesh, {item} is not centered')
     #points_outside = points[points > mesh.bounds[1] or points < mesh.bounds[0]]
     #set all sdf for outside points to |sdf|
     sdf[np.any(pts > mesh.bounds[1],axis=1)] = np.abs(sdf[np.any(pts > mesh.bounds[1],axis=1)])
@@ -568,6 +502,90 @@ def reproject_image(image, depthmap, RT=None, f=245, cx = 112, cy = 112):
         xyz = np.concatenate((xyz, rgb_image), axis=-1)
     
     return xyz
+
+def save_surface_points(inpath):
+    print(inpath)
+    unproj_pts = reproject_blender(inpath)
+    points, rgb = unproj_pts[...,:3], unproj_pts[...,3:]
+    pointcloud = np.concatenate((points, rgb), axis=-1)
+    visualize_rgb_pointcloud(pointcloud, inpath+'/surface_pointcloud.obj')
+
+
+
+def pointcloud_fixed(item, out_folder, sigma, truncate, num_points, voxel_resolution):
+    mesh = trimesh.load(item)
+
+    images_path = str(out_folder).split('/')[:-1]
+    images_path = '/'.join(images_path) + '/'
+
+    #load mesh in trimesh, normalize it, save it, render it
+    unproj_pts = reproject_blender(out_folder)
+
+    rndarray = np.random.randint(0, unproj_pts.shape[0], size=(num_points,))
+    partial_unproj_points = unproj_pts[rndarray]
+
+    opoints, orgb = partial_unproj_points[...,:3], partial_unproj_points[...,3:]
+    
+    #save the surface points
+    osdf = mesh_to_sdf(mesh, opoints)
+    filename = str(out_folder / 'surface_points_blender')
+    occupancy = np.zeros_like(osdf)
+    occupancy[osdf <= 0] = 1
+    occupancy[osdf > 0] = 0  
+    np.savez(filename, points=opoints, rgb=orgb, sdf=osdf.astype(np.float32), occupancy=occupancy.astype(np.float32))
+    
+    newpts, newptsrnd = add_noise(opoints, sigma)
+
+    noisy_rgb = copy_colors_nearest_neighbor(opoints, newpts, orgb, k=5)
+    rgb_rnd = copy_colors_nearest_neighbor(opoints, newptsrnd, orgb, k=5)
+
+    pts = np.append(newpts, newptsrnd).reshape(-1,3).astype(np.float32)
+    rgb = np.append(noisy_rgb,rgb_rnd).reshape(-1,3).astype(np.float32)
+
+    sdf = mesh_to_sdf(mesh, pts)
+
+    if np.count_nonzero(sdf < 0) < 20000:
+        print('not enough inside points for camera, trying sdf_to_mesh:depth')
+        sdf_2 = mesh_to_sdf(mesh, pts, sign_method='depth')
+        if np.count_nonzero(sdf < sdf_2): sdf = sdf_2
+        else: pass
+
+    if np.any(np.abs(mesh.centroid) > 0.1):
+        print(f'possibly erroneous mesh, {item} is not centered')
+    #points_outside = points[points > mesh.bounds[1] or points < mesh.bounds[0]]
+    #set all sdf for outside points to |sdf|
+    sdf[np.any(pts > mesh.bounds[1],axis=1)] = np.abs(sdf[np.any(pts > mesh.bounds[1],axis=1)])
+    sdf[np.any(pts < mesh.bounds[0],axis=1)] = np.abs(sdf[np.any(pts < mesh.bounds[0],axis=1)])
+
+    sdf[sdf > truncate] = truncate
+    sdf[sdf < -truncate] = -truncate
+
+    #this turns sdf into occupancy
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0  
+
+    filename = str(out_folder / 'fixed_point_samples_blender')
+    np.savez(filename, points=pts, rgb=rgb, sdf=sdf.astype(np.float32), occupancy=occupancy.astype(np.float32))
+
+    filename_exr = str(out_folder) + '/_r_336.exr'
+    image = pyexr.read(filename_exr)
+    image[...,:3] = image[...,:3]/3
+    image = rgba2rgb(image)
+    #image = (image[...,:3]-image[...,:3].min())/(image[...,:3].max()-image[...,:3].min())    
+    try:
+        imsave(filename_exr.replace('exr','png'), img_as_ubyte(image))
+    except ValueError:
+        print(f'{item} threw an error while saving the image')
+
+    if voxel_resolution > 0:
+        vox = mesh_to_voxels(mesh, voxel_resolution=voxel_resolution)
+        vox /= 2 #bring it from -1,1 mesh to -0.5, 0.5 mesh values
+        vox[vox < - truncate] = -truncate
+        vox[vox > truncate] = truncate
+        np.save(str(out_folder / 'voxels_fixed'), vox)
+          
+    return pts, rgb, occupancy
 
 def generate_frustum(image_size, intrinsic_inv, depth_min, depth_max):
     x = image_size[0]
@@ -646,10 +664,14 @@ if __name__ == '__main__':
     #do this with argparse
     from util.arguments import argparse
     from util.visualize import visualize_rgb_pointcloud
+    from Manifold_sample import cloud_compare_icp, read_and_apply_icp_norm
     
     from util.bookkeeping import list_model_ids
     from util.visualize import render_shapenet
+    import mesh_to_sdf
     import warnings
+    from tqdm import tqdm
+    from joblib import Parallel, delayed
     warnings.filterwarnings('ignore')
 
     parser = argparse.ArgumentParser(
@@ -657,8 +679,8 @@ if __name__ == '__main__':
                         45parts 10*sigma stddev and 10 parts sqrt(2) uniform sampling.
                         UDF and SDF are truncated to truncate value"""
     )
-
-    parser.add_argument('--inpath', type=str, default='../data/ShapeNetCore.v2')
+    #parser.add_argument('--inpath', type=str, default='../data/ShapeNetCore.v2')
+    parser.add_argument('--inpath', type=str, default='../data/blender')
     parser.add_argument('--outpath', type=str, default='../data/blender')
     parser.add_argument('--truncate', type=float, default=0.1)
     parser.add_argument('--sigma', type=float, default=0.003)
@@ -685,19 +707,27 @@ if __name__ == '__main__':
     print('processing')
     #fix_sampling_sdf(offset=offset) 
     #
-    offset = [i for i in range(3400,3500)]
+    #offset = [i for i in range(3400,3500)]
     #render_blender('a','b')    
-    #offset = [i+5 for i in range(1)]
+    #offset = [i for i in range(10)]
+    offset = 680
+    #names = sorted(glob.glob(str(f'{inpath}/car/*/disn_mesh.obj')))
+    #names = [f.replace('/disn_mesh.obj', '') for f in names]
+    names = sorted(glob.glob(str(f'{inpath}/car/*/surface_points_blender.npz')))
+    names = [f.replace('/surface_points_blender.npz', '') for f in names]
+    
+    
+    out_folder = inpath
+    if isinstance(offset, int):
+        names = names[offset:]
+        print(len(names),'samples remaining')
+    elif isinstance(offset, list):
+        print(len(names) - offset[0],'samples remaining') 
+        names = [names[i] for i in offset]
+        offset = offset[0]
+    print(len(names), names[0],names[-1])
     #check_remaining()
-    # DELETED: 1377, 704, 2663, 2906
-    category_processor_blender(category=category, inpath=inpath, outpath=outpath, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize)
-
-    #category_processor(category=category, inpath=inpath, outpath=outpath, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize)
-
-    """
-    for i in range(len(id_dict.keys())):
-        try: render_shapenet(id_dict, idx=i+offset)
-        except IndexError:
-            print(i+offset,'Index Error')
-        except RuntimeError:
-            print(i+offset,'Memory Error')"""
+    #Parallel(n_jobs=4)(delayed(category_processor_blender)(category, inpath = i, outpath=names, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize) for i in tqdm(names))
+    #Parallel(n_jobs=-1)(delayed(save_surface_points)(i)for i in tqdm(names))
+    #Parallel(n_jobs=4)(delayed(category_processor_blender)(category=category, inpath=i, outpath=i, offset=offset, sigma=sigma, truncate=truncate, num_points=num_points, voxel_resolution=voxel_resolution, visualize=visualize) for i in tqdm(names))
+    Parallel(n_jobs=8)(delayed(fix_surface_points)(i) for i in tqdm(names))
