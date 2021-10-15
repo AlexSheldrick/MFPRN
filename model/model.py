@@ -18,6 +18,7 @@ import trimesh
 
 from torch.nn.init import _calculate_correct_fan
 import numpy as np
+from batchrenorm import BatchRenorm1d
 
 
 args = arguments.parse_arguments()
@@ -95,22 +96,41 @@ class SimpleNetwork(LightningModule):
         self.lin_sdf = nn.Linear(hidden_dim, 1)
         self.lin_rgb = nn.Linear(hidden_dim, 3)
         #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
-        #layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9]
-        layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
+        layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9]
+        #layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
         
         for layer in layers:
             #pass
             #
             #sal_init(layer)
+            init_weights_relu(layer)
             layer = torch.nn.utils.weight_norm(layer)
+            
         #sal_init_last_layer(self.lin_sdf)
-        #self.lin_rgb = torch.nn.utils.weight_norm(self.lin_rgb)
-        #self.BN1 = torch.nn.BatchNorm1d(hidden_dim)
-        #self.BN2 = torch.nn.BatchNorm1d(hidden_dim)
-        #self.BN5 = torch.nn.BatchNorm1d(hidden_dim)
-        #self.BN7 = torch.nn.BatchNorm1d(hidden_dim)
-        #self.BN8 = torch.nn.BatchNorm1d(hidden_dim)
-        #self.BN9 = torch.nn.BatchNorm1d(hidden_dim)
+        #init_weights_symmetric(self.lin_sdf)
+        self.lin_sdf = torch.nn.utils.weight_norm(self.lin_sdf)
+        #init_weights_symmetric(self.lin_rgb)
+        self.lin_rgb = torch.nn.utils.weight_norm(self.lin_rgb)
+        """self.BN1 = torch.nn.BatchNorm1d(hidden_dim)
+        self.BN2 = torch.nn.BatchNorm1d(hidden_dim)
+        self.BN5 = torch.nn.BatchNorm1d(hidden_dim)
+        self.BN7 = torch.nn.BatchNorm1d(hidden_dim)
+        self.BN8 = torch.nn.BatchNorm1d(hidden_dim)
+        self.BN9 = torch.nn.BatchNorm1d(hidden_dim)"""
+
+        """self.BN1 = torch.nn.LayerNorm(hidden_dim)
+        self.BN2 = torch.nn.LayerNorm(hidden_dim)
+        self.BN5 = torch.nn.LayerNorm(hidden_dim)
+        self.BN7 = torch.nn.LayerNorm(hidden_dim)
+        self.BN8 = torch.nn.LayerNorm(hidden_dim)
+        self.BN9 = torch.nn.LayerNorm(hidden_dim)"""
+
+        """self.BN1 = BatchRenorm1d(hidden_dim)
+        self.BN2 = BatchRenorm1d(hidden_dim)
+        self.BN5 = BatchRenorm1d(hidden_dim)
+        self.BN7 = BatchRenorm1d(hidden_dim)
+        self.BN8 = BatchRenorm1d(hidden_dim)
+        self.BN9 = BatchRenorm1d(hidden_dim)"""
         
         # Linear: 
         # Input(N, *, H_in) - H_in: input features.
@@ -200,7 +220,7 @@ class SimpleNetwork(LightningModule):
         rgb = self.embedding_sdf(sdf)
         rgb = torch.cat((features, rgb), axis=-1)
         rgb = self.actvn(self.lin9(rgb))
-        #rgb = #out = self.BN9(out)
+        #rgb = self.BN9(out)
         rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1))
 
         return sdf.squeeze(-1), rgb
@@ -722,4 +742,19 @@ def sal_init_last_layer(m):
             with torch.no_grad():
                 torch.nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_in')), std=0.00001)
         if hasattr(m, 'bias'):
-            m.bias.data.fill_(0.0)
+            m.bias.data.fill_(-0.1)
+
+
+def init_weights_relu(m):
+    if type(m) == nn.Linear:
+        if hasattr(m, 'weight'):
+            torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if hasattr(m, 'bias'):
+            m.bias.data.fill_(0.)
+
+def init_weights_symmetric(m):
+    if type(m) == nn.Linear:
+        if hasattr(m, 'weight'):
+            torch.nn.init.xavier_normal_(m.weight)
+        if hasattr(m, 'bias'):
+            m.bias.data.fill_(0.)

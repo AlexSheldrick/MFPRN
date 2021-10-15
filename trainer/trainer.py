@@ -57,7 +57,7 @@ class ImplicitTrainer(pl.LightningModule):
             {'params': rgb_params, 'lr':self.hparams.lr}
             ], lr=self.hparams.lr, weight_decay = self.hparams.lr_decay)"""
         #lr is decided by finder, aka the maximum
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= (2315 // self.hparams.batch_size), epochs=self.hparams.max_epoch)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= (2315 // (self.hparams.batch_size)), epochs=self.hparams.max_epoch)
         
         sched = {
             'scheduler': scheduler,
@@ -346,7 +346,7 @@ def train_scene_net(args):
         gpus=[args.gpu],num_sanity_val_steps=args.sanity_steps, checkpoint_callback=True, callbacks=[checkpoint_callback, lr_monitor], max_epochs=args.max_epoch, 
         limit_val_batches=args.val_check_percent, val_check_interval=min(args.val_check_interval, 1.0), 
         check_val_every_n_epoch=max(1, args.val_check_interval), resume_from_checkpoint=args.resume, logger=tb_logger, benchmark=True, 
-        profiler=args.profiler, precision=args.precision, #accumulate_grad_batches=4, #stochastic_weight_avg=True,#gradient_clip_val=0.1#, 
+        profiler=args.profiler, precision=args.precision, #accumulate_grad_batches=6#, 
         )
     if args.resume:
         #model.hparams.freeze_pretrained = None 
@@ -371,11 +371,14 @@ def train_scene_net(args):
         #trainer.fit(model)
     
     else: 
-        if args.precision == 16:
-            trainer.scaler = torch.cuda.amp.GradScaler()
+        
         # Run learning rate finder
-        if args.autoLR is not None:        
-            lr_finder = trainer.tuner.lr_find(model, min_lr = 1e-8, max_lr=1e1, num_training=100)
+        #model_checkpoint = ''
+        #model = ImplicitTrainer.load_from_checkpoint(args.test, strict = False)
+        if args.autoLR is not None:
+            if args.precision == 16:
+                trainer.scaler = torch.cuda.amp.GradScaler()        
+            lr_finder = trainer.tuner.lr_find(model, min_lr = 1e-8, max_lr=1e2, num_training=100)
             # Results can be found in
             print(lr_finder.results)
 

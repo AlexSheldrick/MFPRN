@@ -122,48 +122,50 @@ class ImplicitDataset(Dataset):
             
         if image.shape[-1] == 4: image = rgba2rgb(image)
         #image[...,:3] = (image[...,:3]-image[...,:3].min())/(image[...,:3].max()-image[...,:3].min())
+        if self.hparams.encoder not in ('conv3d', 'ifnet', 'hybrid', 'hybrid_ifnet', 'hybrid_depthproject'):
+            voxels = torch.empty(1)
+        else:
+            # get camera space to grid space transform
+            num_voxels = self.hparams.num_voxels
+            voxel_size = np.round(1/num_voxels + 0.005, decimals=2)
+            intrinsic_inv = (inv(self.intrinsic))
+            frustum = generate_frustum([244, 244], intrinsic_inv, -0.5, 0.5)
+            dims, camera2frustum = generate_frustum_volume(frustum, voxel_size)
 
-        # get camera space to grid space transform
-        num_voxels = self.hparams.num_voxels
-        voxel_size = np.round(1/num_voxels + 0.005, decimals=2)
-        intrinsic_inv = (inv(self.intrinsic))
-        frustum = generate_frustum([244, 244], intrinsic_inv, -0.5, 0.5)
-        dims, camera2frustum = generate_frustum_volume(frustum, voxel_size)
+            # depth from camera to grid space
+            rgbxyz = reproject_image(image, depth, RT=camera, f=245, cx=112, cy=112)
+            rgbdots = rgbxyz[...,3:]
+            xyz = rgbxyz[...,:3]        
 
-        # depth from camera to grid space
-        rgbxyz = reproject_image(image, depth, RT=camera, f=245, cx=112, cy=112)
-        rgbdots = rgbxyz[...,3:]
-        xyz = rgbxyz[...,:3]        
+            coords = np.concatenate([xyz, np.ones((xyz.shape[0], 1))], axis=-1)
+            pts_grid = (camera2frustum @ coords.transpose(1,0))[:3, :].transpose(1,0).reshape(-1, 3) #depth_points_in_gridspace
 
-        coords = np.concatenate([xyz, np.ones((xyz.shape[0], 1))], axis=-1)
-        pts_grid = (camera2frustum @ coords.transpose(1,0))[:3, :].transpose(1,0).reshape(-1, 3) #depth_points_in_gridspace
-
-        #very slow, replaced by histogramdd
-        """for i in range(pts_grid.shape[0]):
-            voxels[0, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += 1
-            voxels[1, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,0]
-            voxels[2, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,1]
-            voxels[3, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,2]"""
-        if self.hparams.voxel_type == 'colored_density':
-            #normalized density voxelgrid with mean-average color of points inside
-            voxels_occ = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
-            voxels_r = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,0])
-            voxels_g = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,1])
-            voxels_b = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,2])
-            voxels = np.stack((voxels_occ, voxels_r, voxels_g, voxels_b),axis=0)
-            voxels[1:, voxels[0] != 0] /= voxels[0, voxels[0] != 0]
-            voxels[0] /= np.nanmax(voxels[0])
-        elif self.hparams.voxel_type == 'density':
-            #normalized density voxelgrid
-            voxels = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
-            voxels /= np.nanmax(voxels)
-            voxels = voxels[np.newaxis, :]
-        elif self.hparams.voxel_type == 'occupancy':
-            #occuapncy voxelgrid (0,1)
-            voxels = np.zeros((1, num_voxels, num_voxels, num_voxels))
-            to_int = lambda x: np.round(x).astype(np.int32)
-            voxels[0, to_int(pts_grid[:, 0]), to_int(pts_grid[:, 1]), to_int(pts_grid[:, 2])] += 1
-            voxels[0] /= np.nanmax(voxels[0])
+            #very slow, replaced by histogramdd
+            """for i in range(pts_grid.shape[0]):
+                voxels[0, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += 1
+                voxels[1, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,0]
+                voxels[2, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,1]
+                voxels[3, rnd(pts_grid[i, 0]), rnd(pts_grid[i, 1]), rnd(pts_grid[i, 2])] += rgbdots[i,2]"""
+            if self.hparams.voxel_type == 'colored_density':
+                #normalized density voxelgrid with mean-average color of points inside
+                voxels_occ = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
+                voxels_r = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,0])
+                voxels_g = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,1])
+                voxels_b = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]], weights=rgbdots[:,2])
+                voxels = np.stack((voxels_occ, voxels_r, voxels_g, voxels_b),axis=0)
+                voxels[1:, voxels[0] != 0] /= voxels[0, voxels[0] != 0]
+                voxels[0] /= np.nanmax(voxels[0])
+            elif self.hparams.voxel_type == 'density':
+                #normalized density voxelgrid
+                voxels = fast_histogram.histogramdd(pts_grid + 0.5, bins=num_voxels, range=[[0, num_voxels], [0, num_voxels], [0, num_voxels]])
+                voxels /= np.nanmax(voxels)
+                voxels = voxels[np.newaxis, :]
+            elif self.hparams.voxel_type == 'occupancy':
+                #occuapncy voxelgrid (0,1)
+                voxels = np.zeros((1, num_voxels, num_voxels, num_voxels))
+                to_int = lambda x: np.round(x).astype(np.int32)
+                voxels[0, to_int(pts_grid[:, 0]), to_int(pts_grid[:, 1]), to_int(pts_grid[:, 2])] += 1
+                voxels[0] /= np.nanmax(voxels[0])
 
         #Do these transformations regardless of train/val/test --> ([0,1] normalization, axis permutation)
         xyz_to_blender = np.array([[1, 0, 0],[0,0,-1],[0,1,0]], dtype=self.precision)
@@ -172,19 +174,16 @@ class ImplicitDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1)
         camera = torch.from_numpy(camera)
         voxels = torch.from_numpy(voxels.astype(self.precision))
+        rgb = torch.cat((rgb, surface_rgb), dim=0)
+        sdf = torch.cat((sdf, surface_sdf), dim=0)
+        points = torch.cat((points, surface_points), dim=0)
 
         #normalize RGB-Pointclouds to 0, 1
         #rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())         
         
-        if self.hparams.encoder not in ('conv3d', 'ifnet', 'hybrid', 'hybrid_ifnet', 'hybrid_depthproject'):
-            voxels = torch.empty(1)
-
         if self.hparams.encoder in ('conv2d_pretrained', 'conv2d_pretrained_projective', 'hybrid', 'hybrid_ifnet', 'hybrid_depthproject') and self.hparams.freeze_pretrained is not None:
             image = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))(image)
-        rgb = torch.cat((rgb, surface_rgb), dim=0)
-        sdf = torch.cat((sdf, surface_sdf), dim=0)
-        points = torch.cat((points, surface_points), dim=0)
-        #print(f'points: {points.shape}, rgb: {rgb.shape}, sdf: {sdf.shape}')
+
         return {
             'name': item,
             'camera': camera,

@@ -6,7 +6,7 @@ from random import randint
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_workers', type=int, default=2, help='num workers')
+    parser.add_argument('--num_workers', type=int, default=4, help='num workers')
     parser.add_argument('--gpu', type=int, nargs='+', default=0, help='gpus')
     parser.add_argument('--sanity_steps', type=int, default=1, help='overfit multiplier')
     parser.add_argument('--resume', type=str, default=None, help='resume checkpoint')
@@ -21,7 +21,7 @@ def parse_arguments():
     parser.add_argument('--lr', type=float, default=1e-2, help='learning rate')
     parser.add_argument('--lr_decay', type=float, default=1e-4, help='learning rate decay')
 
-    parser.add_argument('--seed', type=int, default=-1, help='random seed')
+    parser.add_argument('--seed', type=int, default=42, help='random seed') #45
 
     parser.add_argument('--res', type=int, default=64, help='Voxelsize for inference')
     parser.add_argument('--inf_res', type=int, default=1, help='Multiple of inference resolution per training grid resolution')
@@ -37,8 +37,8 @@ def parse_arguments():
     
     #important stuff
     parser.add_argument('--fieldtype', type=str, default='sdf', help='type of scalar field, sdf/occupancy/udf are possible values')
-    parser.add_argument('--experiment', type=str, default='Newdata-F_SDF_voxelsize_32_vtype_cold_1C-80-ResNet-Nopretrain-WN-redesign', help='experiment directory')
-    parser.add_argument('--batch_size', type=int, default=6, help='batch size')
+    parser.add_argument('--experiment', type=str, default='Newdata-F_SDF_voxelsize_32_vtype_cold_1C-80-ResNet-Nopretrain-WN-MyInit', help='experiment directory')
+    parser.add_argument('--batch_size', type=int, default=10, help='batch size')
     parser.add_argument('--freeze_pretrained', type=int, default=None, help='freeze_pretrained weights up to layer n')
 
     parser.add_argument("--transforms", nargs='+', type=str, default=['Brightness', 'ColorJitter', 'ColorPermute', 'Background', 'HorizontalFlip', 'VerticalFlip'], help='types of transforms')
