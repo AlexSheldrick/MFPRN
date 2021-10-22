@@ -1,5 +1,5 @@
 # MFPRN
-monocular feature projection reconstruction network
+monocular feature projection & object reconstruction network
 
 # 3D Reconstruction from a Single RGB Image
 
