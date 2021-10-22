@@ -35,7 +35,7 @@ In this work, we used the cars subset of [ShapeNet](https://shapenet.org/) datas
 + [Occupancy Networks](https://github.com/autonomousvision/occupancy_networks) by [Mescheder et. al. CVPR'19] 
 
 #### This project is mainly inspired from the following papers:
-+[IF-Nets](https://arxiv.org/abs/2003.01456) by [Chibane et. al. 2020] 
-+[Occupancy Networks](https://github.com/autonomousvision/occupancy_networks) by [Mescheder et. al. CVPR'19] 
-+[PiFU](https://shunsukesaito.github.io/PIFu/) by [Shunsuke Saito et. al. ICCV'19]
-+[DISN](https://github.com/laughtervv/DISN) by [Qiangeng Xu et. al. NeurIPS'19]
++ [IF-Nets](https://arxiv.org/abs/2003.01456) by [Chibane et. al. 2020] 
++ [Occupancy Networks](https://github.com/autonomousvision/occupancy_networks) by [Mescheder et. al. CVPR'19] 
++ [PiFU](https://shunsukesaito.github.io/PIFu/) by [Shunsuke Saito et. al. ICCV'19]
++ [DISN](https://github.com/laughtervv/DISN) by [Qiangeng Xu et. al. NeurIPS'19]
