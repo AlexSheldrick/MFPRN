@@ -10,7 +10,7 @@ from util import arguments
 from dataset.dataset import ImplicitDataset
 from model.model import SimpleNetwork, implicit_to_mesh, implicit_rgb_only, rotate_world_to_view, project_3d_to_2d_gridsample
 from util.visualize import render_mesh
-from util.bookkeeping import list_model_ids
+#from util.bookkeeping import list_model_ids
 
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -27,6 +27,11 @@ class ImplicitTrainer(pl.LightningModule):
         super(ImplicitTrainer, self).__init__()
         self.save_hyperparameters(kwargs)
         self.model = SimpleNetwork(self.hparams)
+        if self.hparams.test is not None:
+            self.splitlen = len([x.strip() for x in (Path("../data/splits") / kwargs.splitsdir / f"train.txt").read_text().split("\n") if x.strip() != ""])
+        else:
+            self.splitlen = 2150
+        print(self.splitlen)
 
         my_transforms = self.hparams.transforms
 
@@ -57,7 +62,7 @@ class ImplicitTrainer(pl.LightningModule):
             {'params': rgb_params, 'lr':self.hparams.lr}
             ], lr=self.hparams.lr, weight_decay = self.hparams.lr_decay)"""
         #lr is decided by finder, aka the maximum
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= (2315 // (self.hparams.batch_size)), epochs=self.hparams.max_epoch)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= (self.splitlen // (self.hparams.batch_size)), epochs=self.hparams.max_epoch)
         
         sched = {
             'scheduler': scheduler,
@@ -67,7 +72,7 @@ class ImplicitTrainer(pl.LightningModule):
         #max 0.009, min0.0001
         opt_g.zero_grad(set_to_none=True)
         
-        return [opt_g], [sched] #sched
+        return [opt_g], [sched] #
     
     def train_dataloader(self):
         dataset = self.dataset('train')
@@ -124,6 +129,8 @@ class ImplicitTrainer(pl.LightningModule):
         loss = 0        
         sdf_loss = self.lossfunc(sdf, batch['sdf'])
         rgb_loss = torch.nn.functional.l1_loss(rgb, batch['rgb']) #roughly the same scale as clamped sdf
+        #sdf_loss = torch.nn.functional.mse_loss(sdf.float(), batch['sdf'].float(), reduction='mean')
+        #rgb_loss = torch.nn.functional.mse_loss(rgb.float(), batch['rgb'].float(), reduction='mean')
         
         if sdf_surface is not None and self.hparams.fieldtype == 'sdf':
             
@@ -197,21 +204,24 @@ class ImplicitTrainer(pl.LightningModule):
                 image_input = np.ones_like(images)
                 pyexr_array = batch['image'].detach().cpu().numpy()
                 image_input[:3, :224, :224] = pyexr_array                
-                implicit_rgb_only(self.model, batch, obj_path=(obj_path), output_path=output_vis_path/'mesh_rgb.obj')
+                #implicit_rgb_only(self.model, batch, obj_path=(obj_path), output_path=output_vis_path/'mesh_rgb.obj')
                 #(network, batch, obj_path, output_path)
-                images_rgb_inference = render_mesh(output_vis_path/'mesh_rgb.obj', viewangle = int(sample_idx))
-                images_rgb_inference = images_rgb_inference.detach().cpu().numpy().reshape(-1, images_rgb_inference.shape[2], 4).transpose(2,0,1)
+                #images_rgb_inference = render_mesh(output_vis_path/'mesh_rgb.obj', viewangle = int(sample_idx))
+                #images_rgb_inference = images_rgb_inference.detach().cpu().numpy().reshape(-1, images_rgb_inference.shape[2], 4).transpose(2,0,1)
+                #images_rgb_inference = np.ones((4,1120,896))
 
                 #render shapenet original as a comparison
                 #render shapenet broke
-                image_shapenet = np.ones_like(images_rgb_inference)
+                #image_shapenet = np.ones_like(images_rgb_inference)
                 """#image_shapenet, _ = render_shapenet(id_dict, outpath=None, idx=shapenet_idx, batchsize=4, distance=1.7, verbose=False)
                 #image_shapenet = image_shapenet.detach().cpu().numpy().reshape(-1,image_shapenet.shape[2],4).transpose(2,0,1)
                 
                 #concat everything for tensorboard
                 #tensorboard expects (batch_size, height, width, channels)
                 #images is 4, 672, 224(*4)"""
-                images = np.concatenate((image_input, images, images_rgb_inference, image_shapenet), axis=2)
+                #images = np.concatenate((image_input, images, images_rgb_inference, image_shapenet), axis=2)
+                images = np.concatenate((image_input, images), axis=2)
+                
                 """
                 images = images.transpose(1,2,0)
                 draw = ImageDraw.Draw(images)
@@ -363,6 +373,8 @@ def train_scene_net(args):
         model = ImplicitTrainer.load_from_checkpoint(args.test, strict = False)
         #model.hparams.num_points = 50000
         #model.level = 1-0.999
+        #model.hparams.num_surface_points = 3000
+        model.hparams.num_points *= 3*model.hparams.batch_size
         model.hparams.batch_size = 1
         model.hparams.res = 256
         model.hparams.split = args.splitsdir
@@ -396,9 +408,10 @@ def train_scene_net(args):
         # Fit model      
         trainer.fit(model)
 
-        #model.hparams.batch_size = 1
-        #model.hparams.res = 256
-        #trainer.test(model)
+        model.hparams.num_points *= 3*model.hparams.batch_size
+        model.hparams.batch_size = 1
+        model.hparams.res = 256
+        trainer.test(model)
 
 
 if __name__ == '__main__':

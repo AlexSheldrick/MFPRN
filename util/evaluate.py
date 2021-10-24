@@ -5,6 +5,7 @@ from data_processing.implicit_waterproofing import implicit_waterproofing
 from util.visualize import render_mesh
 import pyexr
 from skimage.color import rgba2rgb
+rng = np.random.default_rng()
 
 # taken from ifnet: https://github.com/jchibane/if-net/blob/master/data_processing/evaluation.py
 ## mostly apdopted from occupancy_networks/im2mesh/common.py and occupancy_networks/im2mesh/eval.py
@@ -123,18 +124,18 @@ def distance_p2p(pointcloud_pred, pointcloud_gt,
 
 def l1_loss(images_1, images_2, pixel_average=True):
     # expects (batch, h, w, c) inputs
-    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*images_1.shape[3]
-    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]
+    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*3
+    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*3
     
-    channelwise_l1_loss = (np.abs(images_1-images_2))
+    channelwise_l1_loss = (np.abs(images_1[...,:3]-images_2[...,:3]))
     mean_l1_img_loss = np.sum(channelwise_l1_loss)/normalization
     if not pixel_average: return channelwise_l1_loss
     return mean_l1_img_loss
 
 def l2_loss(images_1, images_2, pixel_average=True):
     # expects (batch, h, w, c) inputs
-    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*images_1.shape[3]
-    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]
+    if images_1.ndim == 4: normalization = images_1.shape[0]*images_1.shape[1]*images_1.shape[2]*3
+    elif images_1.ndim == 3: normalization = images_1.shape[0]*images_1.shape[1]*3
     
     channelwise_l2_loss = np.sqrt( ((images_1[...,0] - images_2[...,0])**2) + 
                                    ((images_1[...,1] - images_2[...,1])**2) + 
@@ -144,32 +145,41 @@ def l2_loss(images_1, images_2, pixel_average=True):
     mean_L2_img_loss = np.sum(channelwise_l2_loss)/normalization
     return mean_L2_img_loss
 
-def pixelwise_loss(predicted_mesh_path, gt_files_path, num_images = 30, pixel_average = True):
+def pixelwise_loss(predicted_mesh_path, gt_files_path, num_images = 3, pixel_average = True):
     elevation = np.arctan(0.6/1)/np.pi*180
+
+    rnd_idx = rng.permutation(30)[:num_images]
     rendered_images = np.empty((num_images, 224,224, 3))
     prerendered_images = np.empty((num_images, 224,224, 3))
 
-    for i in range(num_images):
-        image = render_mesh(predicted_mesh_path, elevation=elevation, start=i)
+    for i, idx in enumerate(rnd_idx):
+        image = render_mesh(predicted_mesh_path, elevation=elevation, start=idx)
         rendered_images[i] = image.cpu().numpy()[...,:3]
         
-        sample_idx = str(i*12).zfill(3)
+        sample_idx = str(idx*12).zfill(3)
         pyexr_img = pyexr.read(f'{gt_files_path}/_r_{sample_idx}.exr')
         pyexr_img[...,:3] = pyexr_img[...,:3]/3
         pyexr_img = rgba2rgb(pyexr_img)
         
         prerendered_images[i] = pyexr_img
-
+    #print(rendered_images.shape, prerendered_images.shape)
     L1 = l1_loss(rendered_images, prerendered_images, pixel_average=pixel_average)
     L2 = l2_loss(rendered_images, prerendered_images, pixel_average=pixel_average)
-
     return L1, L2
 
+def signif(x, p):
+    x = np.asarray(x)
+    x_positive = np.where(np.isfinite(x) & (x != 0), np.abs(x), 10**(p-1))
+    mags = 10 ** (p - 1 - np.floor(np.log10(x_positive)))
+    return np.round(x * mags) / mags
+
 if __name__ == "__main__":
-    from pathlib import Path
     import glob
     import argparse
     from tqdm import tqdm
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning) 
+    
 
     parser = argparse.ArgumentParser(
         description='Split Data'
@@ -185,7 +195,7 @@ if __name__ == "__main__":
     #prepare mesh_pathes to read and evaluate
     #point to experiment, read all folders, compare to folders of GT
     predicted_meshes_paths = glob.glob(args.test + '/*[!.txt]') #points to #mesh for predicted mesh
-    exp_idx = [predicted_meshes_paths[i].split('/')[-1] for i in range(len(predicted_meshes_paths))] #mesh
+    exp_idx = [predicted_meshes_paths[i].split('/')[-1] for i in range(len(predicted_meshes_paths))]#[:50] #mesh
     GT_path = args.GT_path
 
     ###evaluation here  
@@ -205,7 +215,10 @@ if __name__ == "__main__":
         names.append(idx)
         
         #pixelwise loss
-        L1, L2 = pixelwise_loss(f'{predicted_meshes_paths[i]}/mesh.obj', f'{GT_path}/{idx}')        
+        L1, L2 = pixelwise_loss(f'{predicted_meshes_paths[i]}/mesh.obj', f'{GT_path}/{idx}')
+        if (not np.any(np.isnan(L1))) and (not np.any(np.isnan(L2))): pass
+        else: L1, L2 = 0, 0
+        #L1, L2 = 0, 0      
 
         for key in out_dict.keys():
             performance[key].append(out_dict[key])
@@ -215,18 +228,21 @@ if __name__ == "__main__":
     #sort meshes according to iou for cherry picking and failure cases
     ious = performance['iou']
     sorted_names = [x for _,x in sorted(zip(ious,names))]
-    sorted_ious = np.around(sorted(ious), decimals=3)
+    sorted_ious = signif(sorted(ious), 3)
 
     #write file
     with open(f'{args.test}/results.txt', 'w') as file:
         n = len(performance['completeness'])
         file.write(str(n)+' meshes'+'\n')
         for key in performance.keys():
-            file.write('mean '+key+': '+str(np.sum(performance[key])/n)+'\n') #avg ('completeness'): ...
+            file.write('mean '+key+': '+str(signif(np.sum(performance[key])/n,3))+'\n') #avg ('completeness'): ...
         file.write('\n')
         for key in performance.keys():
-            file.writelines(key+": "+str(performance[key]))
+            file.writelines(key+":"+'\n'+str(signif(performance[key], 3)))
             file.write('\n')
+            file.write('\n')
+        file.write('sorted by best IoU')
+        file.write('\n')
         for i in range(len(sorted_ious)):
-            file.write(str(sorted_names[i])+': '+str(sorted_ious[i])+', ')
+            file.write(str(sorted_names[i])+": "+str(sorted_ious[i])+'\n')
 

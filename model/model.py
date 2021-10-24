@@ -18,7 +18,7 @@ import trimesh
 
 from torch.nn.init import _calculate_correct_fan
 import numpy as np
-from batchrenorm import BatchRenorm1d
+#from batchrenorm import BatchRenorm1d
 
 
 args = arguments.parse_arguments()
@@ -64,19 +64,31 @@ class SimpleNetwork(LightningModule):
         if self.hparams.encoder == 'conv2d_pretrained_projective':
             self.feature_extractor = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
              
-            feature_size = 256 + point_embedding_size
+            feature_size = 512 + point_embedding_size
 
         if self.hparams.encoder == 'hybrid':
             self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
             self.feature_extractor_3d = Conv3dFeatureExtractor(hparams, 16,32,64,128)
             feature_size = point_embedding_size + 128 + 256
+        
+        if self.hparams.encoder == 'hybrid_surface':
+            self.feature_extractor = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)             
+            feature_size = 512 + point_embedding_size + 128 #sampled points embedded, surface points embedded, rgb
+            self.pointnet = SimplePointnet()
+            #self.surfaceFC1 = nn.Linear(point_embedding_size + 3, 256)
+            #self.surfaceFC2 = nn.Linear(256, 128)
+            #for layer in [self.surfaceFC1, self.surfaceFC1]:
+            #    init_weights_relu(layer)
+            #    layer = torch.nn.utils.weight_norm(layer)
+
 
         if self.hparams.encoder == 'hybrid_depthproject':
             self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
             self.feature_extractor_3d = Conv3d_multiscale_FeatureExtractor(hparams, 64,128,128,128)
             if 'colored_density' in self.hparams.voxel_type: f0_channels = 4
             else: f0_channels = 1
-            feature_size = point_embedding_size + 124 + 256 + f0_channels #256 before
+            feature_size = point_embedding_size + 124 + 256 + f0_channels #256 local 2d + 256 global 2d + 124 local 3d + 64global3d + 3col + embedding
+            
 
         if self.hparams.encoder == 'hybrid_ifnet':
             self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
@@ -96,6 +108,7 @@ class SimpleNetwork(LightningModule):
         self.lin_sdf = nn.Linear(hidden_dim, 1)
         self.lin_rgb = nn.Linear(hidden_dim, 3)
         #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
+        #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9]
         layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9]
         #layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
         
@@ -107,9 +120,9 @@ class SimpleNetwork(LightningModule):
             layer = torch.nn.utils.weight_norm(layer)
             
         #sal_init_last_layer(self.lin_sdf)
-        #init_weights_symmetric(self.lin_sdf)
+        init_weights_symmetric(self.lin_sdf)
         self.lin_sdf = torch.nn.utils.weight_norm(self.lin_sdf)
-        #init_weights_symmetric(self.lin_rgb)
+        init_weights_symmetric(self.lin_rgb)
         self.lin_rgb = torch.nn.utils.weight_norm(self.lin_rgb)
         """self.BN1 = torch.nn.BatchNorm1d(hidden_dim)
         self.BN2 = torch.nn.BatchNorm1d(hidden_dim)
@@ -155,6 +168,18 @@ class SimpleNetwork(LightningModule):
             features = self.feature_extractor(batch['points'], image, batch['camera'])  #(B, num_points, features) 
             points = self.embedding(batch['points'])
             features = torch.cat((features, points), axis=-1) #(bs, num_points, features + 2*embedding_size)
+
+        elif self.hparams.encoder == 'hybrid_surface':
+            features = self.feature_extractor(batch['points'], image, batch['camera'])  #(B, num_points, features) 
+            points = self.embedding(batch['points'])
+            surface_points = self.embedding(batch['voxels'][...,:3]) #pseudovoxels. These are actually surface points
+            surface_rgb = batch['voxels'][...,3:]
+            surface_features = torch.cat((surface_points, surface_rgb), axis=-1)
+            surface_features = self.pointnet(surface_features)
+            surface_features = surface_features.unsqueeze(1)
+            #surface_features = surface_features.transpose(-1,-2)
+            surface_features = surface_features.expand(points.shape[0], points.shape[1], -1)
+            features = torch.cat((features, points, surface_features), axis=-1) #(bs, num_points, features + 2*embedding_size)
         
         elif self.hparams.encoder == 'hybrid':
             features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features) 
@@ -305,7 +330,7 @@ class Conv3d_multiscale_FeatureExtractor(LightningModule):
         self.conv3_3 = nn.Conv3d(f3, f3, 3, padding=1)
         #self.conv4 = nn.Conv3d(f3, f4, 3, padding=1)
         #self.conv4_4 = nn.Conv3d(f4, f4, 3, padding=1)
-        #self.actvn_out = nn.Linear(525, 1)
+        #self.global_out = nn.Conv3d(f3, 1, 3, padding=1)
 
         self.reduce_1 = torch.nn.Conv1d(f1, 24, 1)
         self.reduce_2 = torch.nn.Conv1d(f2, 36, 1)
@@ -314,15 +339,17 @@ class Conv3d_multiscale_FeatureExtractor(LightningModule):
         self.BN1 = torch.nn.BatchNorm3d(f1)
         self.BN2 = torch.nn.BatchNorm3d(f2)
         self.BN3 = torch.nn.BatchNorm3d(f3)
-        #self.reduce_4 = torch.nn.Conv1d(f4, 68, 1)
+        self.BN4 = torch.nn.BatchNorm3d(f4)
+        
 
         self.pool = nn.MaxPool3d(2)
         #self.pool = nn.AvgPool3d(2)
         self.actvn = nn.ReLU()
 
-        #layers = [self.conv1, self.conv2, self.conv3, self.conv4, self.reduce_1, self.reduce_2, self.reduce_3] #, self.reduce_4
-        #for layer in layers:
-            #layer = torch.nn.utils.weight_norm(layer)
+        layers = [self.conv1, self.conv1_1, self.conv2, self.conv2_2, self.conv3, self.conv3_3, self.reduce_1, self.reduce_2, self.reduce_3] #, self.reduce_4
+        for layer in layers:
+            init_weights_relu(layer)
+            layer = torch.nn.utils.weight_norm(layer)
 
     
     def forward(self, points, voxels): #vox in (say 32) f_n --> 4,16,32,64,128 --> 225 or 228 total
@@ -344,21 +371,31 @@ class Conv3d_multiscale_FeatureExtractor(LightningModule):
         out = self.actvn(self.conv3(out))
         out = self.BN3(self.actvn(self.conv3_3(out)))
         feature_3 = F.grid_sample(out, p, align_corners=True) # f3 : 64
+
+        #out = self.pool(out)
+        #out = self.actvn(self.conv3(out))
+        #out = self.BN4(self.actvn(self.conv4_4(out)))
+
         #out = self.pool((self.actvn(self.conv4(out))))
         #feature_4 = F.grid_sample(out, p, align_corners=True) # f4 : 128
         # here every channel corresponds to one feature.
         
         feature_0 = feature_0.squeeze(-2).squeeze(-2) #4
         feature_1 = feature_1.squeeze(-2).squeeze(-2)
-        feature_1 = self.reduce_1(feature_1) #8
+        feature_1 = self.actvn(self.reduce_1(feature_1)) #8
         feature_2 = feature_2.squeeze(-2).squeeze(-2)
-        feature_2 = self.reduce_2(feature_2) #16
+        feature_2 = self.actvn(self.reduce_2(feature_2)) #16
         feature_3 = feature_3.squeeze(-2).squeeze(-2)
-        feature_3 = self.reduce_3(feature_3) #32
+        feature_3 = self.actvn(self.reduce_3(feature_3)) #32
+
         #feature_4 = feature_4.squeeze(-2).squeeze(-2)
         #feature_4 = self.reduce_4(feature_4) #68
         #--> 128 features per point
 
+        #out = self.actvn(self.global_out(out)) #B, 1, 4,4,4
+        #out = out.reshape(-1, 64, 1)
+        #out = out.expand(feature_0.shape[0], 64, feature_0.shape[-1])
+        
         features = torch.cat((feature_0, feature_1, feature_2, feature_3), dim=1)  # (B, features, 1,1,sample_num) #, feature_4
         #shape = features.shape
         #features = torch.reshape(features, 
@@ -397,6 +434,7 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
             self.reduce_3 = torch.nn.Conv1d(512, 32, 1)
             self.reduce_4 = torch.nn.Conv1d(1024, 64, 1)
             self.reduce_5 = torch.nn.Conv1d(2048, 133, 1) #133, 64, 32, 16, 8
+            self.global_feat_out = torch.nn.Conv1d(2048, 256, 1)
         else:
             print('model is resnet50')
             self.pretrained = torch.hub.load('pytorch/vision:v0.10.0', 'resnet50', pretrained=False)            
@@ -416,17 +454,20 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
             self.reduce_3 = torch.nn.Conv1d(512, 32, 1)
             self.reduce_4 = torch.nn.Conv1d(1024, 64, 1)
             self.reduce_5 = torch.nn.Conv1d(2048, 133, 1) #133, 64, 32, 16, 8
+            self.global_feat_out = torch.nn.Linear(2048, 256)
         
-        self.BN1 = torch.nn.BatchNorm1d(8)
-        self.BN2 = torch.nn.BatchNorm1d(16)
-        self.BN3 = torch.nn.BatchNorm1d(32)
-        self.BN4 = torch.nn.BatchNorm1d(64)
-        self.BN5 = torch.nn.BatchNorm1d(133)
+        self.BN1 = torch.nn.BatchNorm2d(64)
+        self.BN2 = torch.nn.BatchNorm2d(256)
+        self.BN3 = torch.nn.BatchNorm2d(512)
+        self.BN4 = torch.nn.BatchNorm2d(1024)
+        self.BN5 = torch.nn.BatchNorm2d(2048)
         self.actvn = torch.nn.ReLU()
 
-        #conv_layers = [self.reduce_1,  self.reduce_2,  self.reduce_3,  self.reduce_4,  self.reduce_5]
-        #for layer in conv_layers:
-        #    layer = torch.nn.utils.weight_norm(layer)
+        
+        feat_layers = [self.reduce_1,  self.reduce_2,  self.reduce_3,  self.reduce_4,  self.reduce_5, self.global_feat_out]
+        for layer in feat_layers:
+            init_weights_relu(layer)
+            #layer = torch.nn.utils.weight_norm(layer)
 
         if freeze_pretrained:
             print(f'freezing layers up to layer: {freeze_pretrained}')
@@ -453,16 +494,24 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
         projected_points = projected_points.unsqueeze(1) #points are now x,y within (-1, 1)
         feature_0 = F.grid_sample(images, projected_points) #(BS, 3, 1, 1) features: #BS,C, 1,numpoints -> 2, 3, 1, numpoints
         
-        net = self.layer1(images)
+        net = self.BN1(self.layer1(images))
         feature_1 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 64, 1, numpoints)
-        net = self.layer2(net) 
+        net = self.BN2(self.layer2(net)) 
         feature_2 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 256, 1, numpoints)
-        net = self.layer3(net)
+        net = self.BN3(self.layer3(net))
         feature_3 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 512, 1, numpoints)
-        net = self.layer4(net)
+        net = self.BN4(self.layer4(net))
         feature_4 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 1024, 1, numpoints)
-        net = self.layer5(net)
-        feature_5 = F.grid_sample(net.view(net.shape[0],-1, 1, 1), projected_points, align_corners=True) #(BS, 2048, 1, numpoints)
+        net = self.BN5(self.layer5(net))
+        feature_5 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 2048, 1, numpoints)
+
+        #net = net.reshape(points.shape[0], 2048)
+        #.view(net.shape[0],-1, 1, 1)
+        #net = torch.flatten(net, start_dim=1)
+        #net = self.actvn(self.global_feat_out(net))
+
+        #net = net.unsqueeze(2)#10,256,1
+        #net = net.expand(points.shape[0], -1, points.shape[1])
 
 
         #print(feature_0.shape, '\n')
@@ -480,11 +529,18 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
         feature_4 = self.reduce_4(feature_4)
         feature_5 = self.reduce_5(feature_5)
 
-        feature_1 = self.BN1(self.actvn(feature_1))
-        feature_2 = self.BN2(self.actvn(feature_2))
-        feature_3 = self.BN3(self.actvn(feature_3))
-        feature_4 = self.BN4(self.actvn(feature_4))
-        feature_5 = self.BN5(self.actvn(feature_5))
+        feature_1 = self.actvn(feature_1)
+        feature_2 = self.actvn(feature_2)
+        feature_3 = self.actvn(feature_3)
+        feature_4 = self.actvn(feature_4)
+        feature_5 = self.actvn(feature_5)
+        #net : BS, num_points, 256
+        
+        #feature_1 = self.BN1(self.actvn(feature_1))
+        #feature_2 = self.BN2(self.actvn(feature_2))
+        #feature_3 = self.BN3(self.actvn(feature_3))
+        #feature_4 = self.BN4(self.actvn(feature_4))
+        #feature_5 = self.BN5(self.actvn(feature_5))
 
 
         features = torch.cat((feature_0, feature_1, feature_2, feature_3, feature_4, feature_5), dim=1)
@@ -599,6 +655,64 @@ class IFNetFeatureExtractor(LightningModule):
         features = torch.cat((feature_0, feature_1, feature_2, feature_3), dim=1)  # (B, features, 1,7,sample_num)
         return features
 
+def maxpool(x, dim=-1, keepdim=False):
+    out, _ = x.max(dim=dim, keepdim=keepdim)
+    return out
+
+
+##This is the simple PointNet encoder from Mescheder et al. OccNet
+# Slightly adapted to allow for embedded points
+class SimplePointnet(nn.Module):
+    ''' PointNet-based encoder network.
+    Args:
+        c_dim (int): dimension of latent code c
+        dim (int): input points dimension
+        hidden_dim (int): hidden dimension of the network
+    '''
+    #bs, num_points, 2*embedding_size
+    def __init__(self, c_dim=128, dim=3+512, hidden_dim=256):
+        super().__init__()
+        self.c_dim = c_dim
+
+        self.fc_0 = nn.Linear(dim, hidden_dim)
+        self.fc_1 = nn.Linear(2*hidden_dim, hidden_dim)
+        self.fc_2 = nn.Linear(2*hidden_dim, hidden_dim)
+        self.fc_3 = nn.Linear(2*hidden_dim, hidden_dim)
+        self.fc_c = nn.Linear(hidden_dim, 128)
+
+        self.actvn = nn.ReLU()
+        self.pool = maxpool
+
+        for layer in [self.fc_0,self.fc_1,self.fc_2, self.fc_3, self.fc_c]:
+            init_weights_relu(layer)
+            layer = torch.nn.utils.weight_norm(layer)
+        #self.fc_c = init_weights_symmetric(self.fc_c)
+        #self.fc_c = torch.nn.utils.weight_norm(self.fc_c)
+
+    def forward(self, p):
+        #batch_size, T, D = p.size()
+        # output size: B x T X F
+        net = self.fc_0(self.actvn(p))
+        pooled = self.pool(net, dim=1, keepdim=True).expand(net.size())
+        net = torch.cat([net, pooled], dim=2)
+
+        net = self.fc_1(self.actvn(net))
+        pooled = self.pool(net, dim=1, keepdim=True).expand(net.size())
+        net = torch.cat([net, pooled], dim=2)
+
+        net = self.fc_2(self.actvn(net))
+        pooled = self.pool(net, dim=1, keepdim=True).expand(net.size())
+        net = torch.cat([net, pooled], dim=2)
+
+        net = self.fc_3(self.actvn(net))
+
+        # Recude to  B x F
+        net = self.pool(net, dim=1)
+        c = self.fc_c(self.actvn(net))
+
+        return c
+
+
 
 def project_3d_to_2d_gridsample(points, f, cx, cy):
     u = -f * points[...,0]/points[...,2] / cx
@@ -619,15 +733,10 @@ class GaussFourierEmbedding(LightningModule):
             self._B = torch.randn((mapping_size, num_input_channels), device='cuda:0') * scale
             self.register_buffer('B', self._B)
         else: self._B = None
-        #self.a = torch.ones_like(self._B[:,0])
         
-    def forward(self, x):
-        
-        #with torch.no_grad():
+    def forward(self, x):        
         if self._B is None: return x
-        #x = torch.cat([a * torch.sin((2.*torch.pi*x) @ self._B.T), a * torch.cos((2.*torch.pi*x) @ self._B.T)], axis=-1) / torch.linalg.norm(a)
-        x = torch.cat([torch.sin((2.*math.pi*x) @ self._B.T), torch.cos((2.*math.pi*x) @ self._B.T)], axis=-1)
-    
+        x = torch.cat([torch.sin((2.*math.pi*x) @ self._B.T), torch.cos((2.*math.pi*x) @ self._B.T)], axis=-1)    
         return x
 
 
@@ -746,15 +855,13 @@ def sal_init_last_layer(m):
 
 
 def init_weights_relu(m):
-    if type(m) == nn.Linear:
-        if hasattr(m, 'weight'):
-            torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-        if hasattr(m, 'bias'):
-            m.bias.data.fill_(0.)
+    if hasattr(m, 'weight'):
+        torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+    if hasattr(m, 'bias'):
+        m.bias.data.fill_(0.)
 
 def init_weights_symmetric(m):
-    if type(m) == nn.Linear:
-        if hasattr(m, 'weight'):
-            torch.nn.init.xavier_normal_(m.weight)
-        if hasattr(m, 'bias'):
-            m.bias.data.fill_(0.)
+    if hasattr(m, 'weight'):
+        torch.nn.init.xavier_normal_(m.weight)
+    if hasattr(m, 'bias'):
+        m.bias.data.fill_(0.)

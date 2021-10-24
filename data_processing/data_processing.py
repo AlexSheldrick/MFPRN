@@ -256,14 +256,6 @@ def read_names(inpath=None):
             id_dict[f'{name}'] = id
     return id_dict
 
-def process_samples(source_path, outpath, category):
-    source_path = Path(source_path)
-    id_dict = read_names()
-    category_path = id_dict[f'{category}']
-    scenes_folders = glob.glob(str(source_path / category_path / "**"))
-    scenes_folders = sorted([folder.split("/")[-1] for folder in scenes_folders])
-    pass
-
 #helpers
 def cc_extract_colored_pc(filepath, outpath, num_points):
     transform = str(outpath / 'transform.txt')
@@ -367,15 +359,9 @@ def category_processor_blender(category, inpath='../data/processed', outpath='..
     #names = sorted(glob.glob(str(f'{inpath}/car/*/disn_mesh.obj')))
     #print(names)
     item = f'{inpath}/disn_mesh.obj'
+    # item = f'{inpath}/disn_mesh.obj'
     out_folder = inpath
     print(f'processing {item}, {datetime.datetime.now()}')
-    """if isinstance(offset, int):
-        names = names[offset:]
-        print(len(names),'samples remaining')
-    elif isinstance(offset, list):
-        print(len(names) - offset[0],'samples remaining') 
-        names = [names[i] for i in offset]
-        offset = offset[0]"""
     
     #for i, item in enumerate(names):
     #print(i+offset, datetime.datetime.now())

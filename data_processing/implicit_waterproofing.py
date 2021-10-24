@@ -31,7 +31,7 @@ def implicit_waterproofing(mesh_source, query_points):
 
         if not holes_list.any():
             break
-        print('iteration start')
+        #print('iteration start')
 
         mesh = mesh_source.copy()
         r = to_rotation_matrix(euler_angles)
