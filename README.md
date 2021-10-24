@@ -3,11 +3,13 @@ monocular feature projection & object reconstruction network
 
 # 3D Reconstruction from a Single RGB Image
 
-![results](results.png)
+![results](SingleView results.png)
 
+# 3D Reconstruction from a Single RGB Image
+![results](Pointcloud-Reconstruction.png)
 
 ## Description
-In this work, we are focusing on single view 3D reconstruction. For this task we explore different feature modalities and their impact on mesh reconstruction quality. A [report](...) will follow at a later date.
+In this work, we are focusing on single view 3D reconstruction. For this task we explore different feature modalities and their impact on mesh reconstruction quality. See [report](https://github.com/AlexSheldrick/MFPRN/blob/main/GR_Alex-Sheldrick_3D-Reconstruction.pdf) for more information.
 
 ## Installation
 A linux system with cuda 9.0 is required.
@@ -19,12 +21,8 @@ conda activate 3d-recon
 ```
 Clone the repository and navigate into it in the terminal.
 
-Install libmesh needed libraries with:
-```
-cd data_processing/libmesh/
-python setup.py build_ext --inplace
-cd ../..
-```
+Details for data-processing and instructions will follow soon.
+
 ## Dataset
 In this work, we used the cars subset of [ShapeNet](https://shapenet.org/) dataset.
 
