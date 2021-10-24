@@ -2,23 +2,18 @@
 import numpy as np
 import pyexr
 
-def create_item_statistics(path, mode='points'):
+def create_item_statistics(path, mode='points', masked=False):
     if 'points' in mode:
         rgb = np.load(path+'/surface_points_blender.npz')['rgb'].astype(np.float32)
         means = np.mean(rgb, axis=0)
         stds = np.std(rgb,axis=0)
     if 'image' in mode:
-        masked = False
         #load inputs per image, compute over all images
         rgb_all = None
         for i in range(30):
             rgb = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}.exr').astype(np.float32)
-            #depthmap = pyexr.read(path+f'/_r_{str((i)*12).zfill(3)}_depth0001.exr').astype(np.float32)[...,0]
-        
-            #mask = rgb[...,3].copy().flatten()
             if masked:
                 mask = rgb[...,3].copy().flatten()
-                #mask = depthmap.flatten()
                 rgb = rgb[mask<65000,:]
                 rgb = rgb[mask==1,:]
             
@@ -32,9 +27,6 @@ def create_item_statistics(path, mode='points'):
         stds = np.std(rgb_all, axis=0, keepdims=True)
 
     return means, stds
-
-"""def create_split_statistics(splitsfile, mode='points'):
-    pass"""
 
 
 if __name__ == '__main__':

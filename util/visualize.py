@@ -1,7 +1,5 @@
 import mcubes as mc
 import numpy as np
-from pytorch3d.renderer.cameras import FoVOrthographicCameras
-from pytorch3d.renderer.lighting import AmbientLights
 from pytorch3d.renderer.materials import Materials
 import trimesh
 from PIL import Image
@@ -335,9 +333,6 @@ if __name__ == "__main__":
     id_dict = list_model_ids(save=False)
     offset = 3471
     offset = [i for i in range(offset, len(id_dict.keys()))]
-    # Memerr[1775, 1772, 1862, 1902, 1999, 2015, 2040, 2060, 2132, 2150, 2187, 2205, 2216, 2217]
-    # Memerr[2278, 2280, 2281, 2283, 2284, 2287, 2289, 2290, 2292, 2296, 2344, 2388, 2450, 2497, 2559, 2636, 2694, 2725, 2806, 2811, 2827, 2886, 2916, 2922, 2933, 2956, 2972, 2978, 3014, 3015, 3025, 3042, 3047, 3051, 3068, 3073, 3075, 3118, 3361, 3434, 3470, 3486]
-    # 2276 throws error (cannot identify image file texture_6)
     offset = [3]
 
     print('renderings remaining:',len(id_dict.keys())-offset[0])

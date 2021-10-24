@@ -1,12 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-#from torch.autograd import grad
-"""
-from pytorch3d.renderer import (
-    look_at_view_transform,
-    FoVPerspectiveCameras,
-)"""
 
 from util import arguments
 from util.visualize import visualize_sdf, make_col_mesh
@@ -18,7 +12,6 @@ import trimesh
 
 from torch.nn.init import _calculate_correct_fan
 import numpy as np
-#from batchrenorm import BatchRenorm1d
 
 
 args = arguments.parse_arguments()
@@ -124,32 +117,11 @@ class SimpleNetwork(LightningModule):
         self.lin_sdf = torch.nn.utils.weight_norm(self.lin_sdf)
         init_weights_symmetric(self.lin_rgb)
         self.lin_rgb = torch.nn.utils.weight_norm(self.lin_rgb)
-        """self.BN1 = torch.nn.BatchNorm1d(hidden_dim)
-        self.BN2 = torch.nn.BatchNorm1d(hidden_dim)
-        self.BN5 = torch.nn.BatchNorm1d(hidden_dim)
-        self.BN7 = torch.nn.BatchNorm1d(hidden_dim)
-        self.BN8 = torch.nn.BatchNorm1d(hidden_dim)
-        self.BN9 = torch.nn.BatchNorm1d(hidden_dim)"""
-
-        """self.BN1 = torch.nn.LayerNorm(hidden_dim)
-        self.BN2 = torch.nn.LayerNorm(hidden_dim)
-        self.BN5 = torch.nn.LayerNorm(hidden_dim)
-        self.BN7 = torch.nn.LayerNorm(hidden_dim)
-        self.BN8 = torch.nn.LayerNorm(hidden_dim)
-        self.BN9 = torch.nn.LayerNorm(hidden_dim)"""
-
-        """self.BN1 = BatchRenorm1d(hidden_dim)
-        self.BN2 = BatchRenorm1d(hidden_dim)
-        self.BN5 = BatchRenorm1d(hidden_dim)
-        self.BN7 = BatchRenorm1d(hidden_dim)
-        self.BN8 = BatchRenorm1d(hidden_dim)
-        self.BN9 = BatchRenorm1d(hidden_dim)"""
         
         # Linear: 
         # Input(N, *, H_in) - H_in: input features.
         # Output(N, *, H_out)
         self.actvn = nn.ReLU()
-        # consider using nn.ReLU6()
 
     def forward(self, batch):
         
@@ -177,7 +149,6 @@ class SimpleNetwork(LightningModule):
             surface_features = torch.cat((surface_points, surface_rgb), axis=-1)
             surface_features = self.pointnet(surface_features)
             surface_features = surface_features.unsqueeze(1)
-            #surface_features = surface_features.transpose(-1,-2)
             surface_features = surface_features.expand(points.shape[0], points.shape[1], -1)
             features = torch.cat((features, points, surface_features), axis=-1) #(bs, num_points, features + 2*embedding_size)
         
@@ -192,10 +163,8 @@ class SimpleNetwork(LightningModule):
         elif self.hparams.encoder == 'hybrid_depthproject':
             features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features)
             features_3d = self.feature_extractor_3d(batch['points'], voxels) 
-            points = self.embedding(batch['points'])
-            #print(features_2d.shape, features_3d.shape, points.shape)            
+            points = self.embedding(batch['points'])  
             features = torch.cat((features_2d, features_3d, points), axis=-1) #(bs, num_points, features_2d(256) + features_3d(128) + 2*embedding_size)
-            #print(features.shape)
 
         elif self.hparams.encoder == 'hybrid_ifnet':
             features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features)
@@ -206,12 +175,7 @@ class SimpleNetwork(LightningModule):
             features_3d = torch.reshape(features_3d, 
                                     (shape[0], shape[1] * shape[3], shape[4]))
             features_3d = features_3d.transpose(-1,-2) # features: (B, num_points, features*7)
-
             points = self.embedding(batch['points'])
-
-            #features_3d = features_3d.transpose(-1,-2)
-            #features_3d = features_3d.expand(-1, points.shape[1], -1)
-
             features = torch.cat((features_2d, features_3d, points), axis=-1) #(bs, num_points, features_2d(256) + features_3d(128) + 2*embedding_size)
 
         else:
@@ -222,50 +186,21 @@ class SimpleNetwork(LightningModule):
             features = torch.cat((features, points), axis=-1) #(bs, 14*14+3, num_points)
         
         out = self.actvn(self.lin1(features))
-        #out = self.BN1(out)
         out = self.actvn(self.lin2(out))
-        #out = self.BN2(out)
-        #out = self.actvn(self.lin3(out))
-        #out = self.actvn(self.lin4(out))
         out = torch.cat((out, features), axis=-1)        
         out = self.actvn(self.lin5(out))
-        #out = self.BN5(out)
-        #out = self.actvn(self.lin6(out))
-        #out = self.BN6(out)
         out = self.actvn(self.lin7(out))
-        #out = self.BN7(out)
         out = self.actvn(self.lin8(out))
-        #out = self.BN8(out)
         sdf = self.lin_sdf(out)
         
         if self.hparams.fieldtype == 'sdf':
             sdf = nn.Tanh()(sdf)
 
-        #rgb = self.embedding_rgb(torch.cat((batch['points'], sdf), axis=-1))
         rgb = self.embedding_sdf(sdf)
         rgb = torch.cat((features, rgb), axis=-1)
         rgb = self.actvn(self.lin9(rgb))
-        #rgb = self.BN9(out)
         rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1))
-
         return sdf.squeeze(-1), rgb
-
-    """def init_camera(self, device=None):
-        if torch.cuda.is_available():
-            device = torch.device("cuda:0")
-            torch.cuda.set_device(device)
-        else:
-            device = torch.device("cpu")
-        
-        batchsize = 12
-                      
-        lastpt = 360 - 360/batchsize - 180
-        azim = torch.linspace(-180, lastpt, batchsize)
-        R, T = look_at_view_transform(1.2, 20, azim)
-
-        cameras = [FoVPerspectiveCameras(device=device, R=R[i].unsqueeze(0), T=T[i].unsqueeze(0)) for i in range(batchsize)]
-
-        return cameras"""
         
 class Conv3dFeatureExtractor(LightningModule):
     def __init__(self, hparams, f1, f2, f3, f4):
@@ -820,18 +755,7 @@ def implicit_rgb_only(network, batch, obj_path, output_path):
     faces = mesh.faces
     rgb = evaluate_network_rgb(network, batch, vertices)
     make_col_mesh(vertices, faces, rgb, output_path)
-"""
-def gradient(inputs, outputs):
-    d_points = torch.ones_like(outputs, requires_grad=False, device=outputs.device)
-    points_grad = grad(
-        outputs=outputs,
-        inputs=inputs,
-        grad_outputs=d_points,
-        create_graph=True,
-        retain_graph=True,
-        only_inputs=True)[0][:, -3:]
-    return points_grad
-"""
+
 #
 # SAL Geometric init proposed by Atzmon et al. 2020 
 def sal_init(m):
@@ -853,7 +777,7 @@ def sal_init_last_layer(m):
         if hasattr(m, 'bias'):
             m.bias.data.fill_(-0.1)
 
-
+#Kaiming init ReLU & symmetric
 def init_weights_relu(m):
     if hasattr(m, 'weight'):
         torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
