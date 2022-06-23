@@ -68,20 +68,13 @@ class SimpleNetwork(LightningModule):
             self.feature_extractor = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)             
             feature_size = 512 + point_embedding_size + 128 #sampled points embedded, surface points embedded, rgb
             self.pointnet = SimplePointnet()
-            #self.surfaceFC1 = nn.Linear(point_embedding_size + 3, 256)
-            #self.surfaceFC2 = nn.Linear(256, 128)
-            #for layer in [self.surfaceFC1, self.surfaceFC1]:
-            #    init_weights_relu(layer)
-            #    layer = torch.nn.utils.weight_norm(layer)
-
 
         if self.hparams.encoder == 'hybrid_depthproject':
             self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
             self.feature_extractor_3d = Conv3d_multiscale_FeatureExtractor(hparams, 64,128,128,128)
             if 'colored_density' in self.hparams.voxel_type: f0_channels = 4
             else: f0_channels = 1
-            feature_size = point_embedding_size + 124 + 256 + f0_channels #256 local 2d + 256 global 2d + 124 local 3d + 64global3d + 3col + embedding
-            
+            feature_size = point_embedding_size + 124 + 256 + f0_channels #256 local 2d + 256 global 2d + 124 local 3d + 64global3d + 3col + embedding            
 
         if self.hparams.encoder == 'hybrid_ifnet':
             self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.freeze_pretrained)
@@ -91,28 +84,18 @@ class SimpleNetwork(LightningModule):
         #3,4,6 added
         self.lin1 = nn.Linear(feature_size, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        #self.lin3 = nn.Linear(hidden_dim , hidden_dim)
-        #self.lin4 = nn.Linear(hidden_dim, hidden_dim)
         self.lin5 = nn.Linear(feature_size + hidden_dim, hidden_dim)
-        #self.lin6 = nn.Linear(hidden_dim, hidden_dim)
         self.lin7 = nn.Linear(hidden_dim, hidden_dim)
         self.lin8 = nn.Linear(hidden_dim, hidden_dim)
         self.lin9 = nn.Linear(feature_size + sdf_embedding, hidden_dim)
         self.lin_sdf = nn.Linear(hidden_dim, 1)
         self.lin_rgb = nn.Linear(hidden_dim, 3)
-        #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
-        #layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin7, self.lin8, self.lin9]
         layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9]
-        #layers = [self.lin1, self.lin2, self.lin5, self.lin7, self.lin8, self.lin9, self.lin_sdf, self.lin_rgb]
         
         for layer in layers:
-            #pass
-            #
-            #sal_init(layer)
             init_weights_relu(layer)
             layer = torch.nn.utils.weight_norm(layer)
             
-        #sal_init_last_layer(self.lin_sdf)
         init_weights_symmetric(self.lin_sdf)
         self.lin_sdf = torch.nn.utils.weight_norm(self.lin_sdf)
         init_weights_symmetric(self.lin_rgb)
@@ -195,13 +178,115 @@ class SimpleNetwork(LightningModule):
         
         if self.hparams.fieldtype == 'sdf':
             sdf = nn.Tanh()(sdf)
+            #renormalized
+            #sdf = nn.Tanh()(sdf) * (self.hparams.max_z - self.hparams.min_z)/2
+        #renormalized_depthmap = torch.sigmoid(logits) * (self.hparams.max_z - self.hparams.min_z) + self.hparams.min_z
 
         rgb = self.embedding_sdf(sdf)
         rgb = torch.cat((features, rgb), axis=-1)
         rgb = self.actvn(self.lin9(rgb))
-        rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1))
+        #renormalized with dataset min & max
+        rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1)) #* (1.083 - 2.420e-05) + 2.420e-05
         return sdf.squeeze(-1), rgb
+
+class DeepSDFDecoder(LightningModule):
+    def __init__(self, hparams, hidden_dim=512):
+        super(DeepSDFDecoder, self).__init__()        
+        self.save_hyperparameters(hparams)        
+
+        if (self.hparams.coordinate_embedding_size[0] > 0):  
+            point_embedding_size = int(2*self.hparams.coordinate_embedding_size[0])
+        if self.hparams.coordinate_embedding_size[0] == 0: 
+            point_embedding_size = 3
+
+        if 'colored_density' in self.hparams.voxel_type: f0_channels = 4
+        else: f0_channels = 1
+        feature_size = point_embedding_size + 124 + 256 + f0_channels #256 local 2d + 256 global 2d + 124 local 3d + 64global3d + 3col + embedding            
+        #64 + 3 + 
+        #feature_size = 387
+        self.lin1 = nn.Linear(feature_size, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin3 = nn.Linear(feature_size + hidden_dim, hidden_dim)
+        self.lin4 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin5 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin6 = nn.Linear(hidden_dim + 1 + feature_size, hidden_dim) #concatenate SDF value of point here to output RGB
+        self.lin_sdf = nn.Linear(hidden_dim, 1)
+        self.lin_rgb = nn.Linear(hidden_dim, 3)
+        self.actvn = nn.ReLU()
         
+        lin_layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6]
+
+        for layer in lin_layers:
+            init_weights_relu(layer)
+            layer = torch.nn.utils.weight_norm(layer)
+
+        for layer in [self.lin_sdf, self.lin_rgb ]:
+            init_weights_symmetric(layer)
+            layer = torch.nn.utils.weight_norm(layer)
+
+
+    def forward(self, features):
+        out = self.actvn(self.lin1(features))
+        out = self.actvn(self.lin2(out))
+        out = torch.cat((out, features), axis=-1)        
+        out = self.actvn(self.lin3(out))
+        out = self.actvn(self.lin4(out))
+        out = self.actvn(self.lin5(out))
+        sdf = self.lin_sdf(out)
+        
+        if self.hparams.fieldtype == 'sdf':
+            #sdf = nn.Tanh()(sdf)
+            sdf = nn.Tanh()(sdf) * (self.hparams.max_z - self.hparams.min_z)/2 + (self.hparams.max_z + self.hparams.min_z)/2
+
+        rgb = torch.cat((out, sdf, features), axis=-1)
+        rgb = self.actvn(self.lin6(rgb))
+
+        #rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1))        
+        #rgb = nn.Tanh()(self.lin_rgb(rgb).squeeze(-1)) * 0.5*(1.083 - 2.420e-05) + 0.5*2.420e-05
+        rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1)) #* (1.083 - 2.420e-05) + 2.420e-05
+
+        return sdf.squeeze(-1), rgb
+
+class PixelAligned2D3DEncoder(LightningModule):
+    def __init__(self, hparams):
+        super(PixelAligned2D3DEncoder, self).__init__()
+        self.save_hyperparameters(hparams)
+
+        self.embedding = GaussFourierEmbedding(3, self.hparams.coordinate_embedding_size[0], self.hparams.coordinate_embedding_scale[0])        
+        self.feature_extractor_2d = PreTrainedFeatureExtractor2D_projective(self.hparams.freeze_pretrained)
+        self.feature_extractor_3d = Conv3d_multiscale_FeatureExtractor(hparams, 64,128,128,128)
+        
+    def forward(self, batch):
+        voxels = batch['voxels']
+        image = batch['image']
+
+        features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features)
+        features_3d = self.feature_extractor_3d(batch['points'], voxels) 
+        #points = self.embedding(batch['points'])  
+
+        features = torch.cat((features_2d, features_3d), axis=-1) #(bs, num_points, features_2d(256) + features_3d(128) + 2*embedding_size)
+        return features
+
+class GlobalFeature2D3DEncoder(LightningModule):
+    def __init__(self,hparams):
+        super(GlobalFeature2D3DEncoder, self).__init__()
+        self.save_hyperparameters(hparams)
+
+        self.feature_extractor_2d = PreTrainedFeatureExtractor2D()
+        self.feature_extractor_3d = Conv3dFeatureExtractor(hparams, 64, 128, 128, 128)
+        self.embedding = GaussFourierEmbedding(3, self.hparams.coordinate_embedding_size[0], self.hparams.coordinate_embedding_scale[0])        
+        
+
+    def forward(self, batch):
+        image = batch['image']
+        voxels = batch['voxels']
+
+        features_2d = self.feature_extractor_2d(batch['points'], image, batch['camera'])  #(B, num_points, features) e.g. 10, 256, 1
+        features_3d = self.feature_extractor_3d(voxels) #eg. 10, 128,.1
+
+        features = torch.cat((features_2d, features_3d), axis=1).squeeze(-1) #(bs, num_points, features_2d(256) + features_3d(128) + 2*embedding_size)
+        return features
+
 class Conv3dFeatureExtractor(LightningModule):
     def __init__(self, hparams, f1, f2, f3, f4):
         super(Conv3dFeatureExtractor, self).__init__()
@@ -230,14 +315,9 @@ class Conv3dFeatureExtractor(LightningModule):
             self.conv4 = nn.Conv3d(f3, f4, 3, padding=1)
             self.conv4_4 = nn.Conv3d(f4, f4, 3, padding=1)
 
-        #self.pool = nn.MaxPool3d(2)
         self.pool = nn.AvgPool3d(2)
         self.actvn = nn.ReLU()
         self.actvn_out = nn.Linear(channels_out**3, 1)
-
-        #layers = [self.conv1, self.conv2, self.conv3, self.conv4, self.actvn_out]
-        #for layer in layers:
-            #torch.nn.utils.weight_norm(layer)
     
     def forward(self, voxels):
         out = self.pool((self.actvn(self.conv1(voxels))))
@@ -345,7 +425,7 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
     # mean = [0.485, 0.456, 0.406] and std = [0.229, 0.224, 0.225].
 
     def __init__(self, freeze_pretrained=None):
-        super(PreTrainedFeatureExtractor2D_projective, self, ).__init__()
+        super(PreTrainedFeatureExtractor2D_projective, self).__init__()
         model = 'resnet'
         if model == 'restnest':
             print('model is resneSt')
@@ -437,7 +517,9 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
         feature_3 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 512, 1, numpoints)
         net = self.BN4(self.layer4(net))
         feature_4 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 1024, 1, numpoints)
-        net = self.BN5(self.layer5(net))
+        net = self.layer5(net)
+        if net.shape[0] > 1:
+            net = self.BN5(net) #to allow for single batches to work
         feature_5 = F.grid_sample(net, projected_points, align_corners=True) #(BS, 2048, 1, numpoints)
 
         #net = net.reshape(points.shape[0], 2048)
@@ -526,8 +608,13 @@ class PreTrainedFeatureExtractor2D(LightningModule):
         self.fc_decoder = torch.nn.utils.weight_norm(self.fc_decoder)
 
     def forward(self, points, image, voxels):
+        hack = False
+        if image.size()[0] == 1: 
+            image = torch.concat((image, image), dim=0)
+            hack = True
         net = self.layers(image)
         net = self.fc_decoder(net.reshape(image.shape[0], 1, 2048))
+        if hack == True: net = net[0].unsqueeze(0)
         return net.transpose(-2,-1)
 
 
@@ -690,26 +777,35 @@ def make_3d_grid(bb_min, bb_max, shape, res_increase = args.inf_res):
 
 
 
-def evaluate_network_on_grid(network, batch, resolution, res_increase = args.inf_res):
-
-    points_batch_size = batch['points'].shape[1] * batch['points'].shape[0] #num_points * batch_size
+def evaluate_network_on_grid(network, batch, resolution, embedding, res_increase = args.inf_res, batch_idx=0):
+    encoder, decoder = network
+    points_batch_size = batch['points'].shape[1] // (batch['points'].shape[0]) #num_points * batch_size
     pointsf = make_3d_grid(
         (-0.5,)*3, (0.5,)*3, resolution, res_increase
     )
     p_split = torch.split(pointsf, points_batch_size)
     probe = {}
-    probe['image'] = batch['image'][0].unsqueeze(0)
-    probe['voxels'] = batch['voxels'][0].unsqueeze(0)
-    probe['camera'] = batch['camera'][0].unsqueeze(0)
+    probe['image'] = batch['image'][batch_idx].unsqueeze(0)
+    probe['voxels'] = batch['voxels'][batch_idx].unsqueeze(0)
+    probe['camera'] = batch['camera'][batch_idx].unsqueeze(0)
     #depth points and prepare points dummies
     values = []
+    
     for pi in p_split:
         probe['points'] = pi.unsqueeze(0).to(batch['image'].device)
         with torch.no_grad():
+            
+            features = encoder(probe)
+            points = embedding(probe['points'])        
+            #sizes = features.size()
+            #features = features.unsqueeze(1).expand(sizes[0], probe['points'].size()[1], sizes[1])
+            features = torch.cat((features, points), axis=2)
 
-            out, _ = network(probe)
-            if network.hparams.fieldtype == 'occupancy':
-                out = torch.sigmoid(out)
+            #features = torch.cat((features, probe['points']), axis=2)
+            out, _ = decoder(features)
+            #out, _ = network(probe)
+            #if network.hparams.fieldtype == 'occupancy':
+            #    out = torch.sigmoid(out)
             #subselect only first n points that we used originally         
 
         values.append(out.squeeze(0).detach().cpu())
@@ -718,14 +814,16 @@ def evaluate_network_on_grid(network, batch, resolution, res_increase = args.inf
     return value_grid
 
 
-def evaluate_network_rgb(network, batch, vertices):
+def evaluate_network_rgb(network, batch, vertices, embedding):
+    encoder, decoder = network
     probe = {}
     probe['image'] = batch['image'][0].unsqueeze(0)
     probe['voxels'] = batch['voxels'][0].unsqueeze(0)
     probe['camera'] = batch['camera'][0].unsqueeze(0)
     #depth points and prepare points dummies
-    
-    points = torch.from_numpy(vertices)
+    if type(vertices) is np.ndarray:
+        points = torch.from_numpy(vertices)
+    else: points = vertices
 
     points_batch_size = batch['points'].shape[1] * batch['points'].shape[0] #num_points * batch_size
     p_split = torch.split(points, points_batch_size)
@@ -733,20 +831,33 @@ def evaluate_network_rgb(network, batch, vertices):
     for pi in p_split:
         with torch.no_grad():
             probe['points'] = pi.to(batch['image'].device).unsqueeze(0).to(batch['points'].dtype)
-            _, out = network(probe)
+            features = encoder(probe)
+            points = embedding(probe['points'])
+            
+        
+            #sizes = features.size()
+            #features = features.unsqueeze(1).expand(sizes[0], probe['points'].size()[1], sizes[1])
+            features = torch.cat((features, points), axis=2)
+            #features = torch.cat((features, probe['points']), axis=2)
+            _, out = decoder(features)
             #subselect only first n points that we used originally  
             rgbs.append(out.squeeze(0).detach().cpu())
     rgb = torch.cat(rgbs, dim=0).numpy()
     return rgb
 
 
-def implicit_to_mesh(network, batch, resolution, threshold_p, output_path, res_increase=args.inf_res):
-    value_grid = evaluate_network_on_grid(network, batch, resolution, res_increase)
+def implicit_to_mesh(network, batch, resolution, embedding, threshold_p, output_path, res_increase=args.inf_res):
+    value_grid = evaluate_network_on_grid(network, batch, resolution, embedding, res_increase)
     #limit to n verts?  
     vertices, faces = visualize_sdf(value_grid, output_path, level=threshold_p, rgb=True)
-    rgb = evaluate_network_rgb(network, batch, vertices)
+    rgb = evaluate_network_rgb(network, batch, vertices ,embedding)
     make_col_mesh(vertices, faces, rgb, output_path)
     #make mesh out of rgb, vertices, triangles
+
+def implicit_to_verts_faces(network, batch, resolution, embedding, threshold_p, output_path, res_increase=args.inf_res, batch_idx=0):
+    value_grid = evaluate_network_on_grid(network, batch, resolution, embedding, res_increase, batch_idx)
+    vertices, faces = visualize_sdf(value_grid, output_path, level=threshold_p, rgb=False, export=False)
+    return vertices, faces
 
 def implicit_rgb_only(network, batch, obj_path, output_path):
     

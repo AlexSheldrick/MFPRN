@@ -11,6 +11,7 @@ import imageio
 from skimage import img_as_ubyte
 import pyexr
 
+
 # Data structures and functions for rendering
 from pytorch3d.structures import Meshes
 from pytorch3d.datasets import (ShapeNetCore)
@@ -25,6 +26,8 @@ from pytorch3d.renderer import (
     TexturesVertex,
     HardFlatShader
 )
+
+from skimage import measure
 
 def render_mesh(obj_filename, outpath=None, viewangle = None, cull_backfaces = False, elevation=None, start=None):
     if torch.cuda.is_available():
@@ -265,17 +268,27 @@ def visualize_sdf(sdf, output_path, level=0.75, rgb=False, export=False):
     if rgb:
         rgb = sdf[...,1:]
         sdf = sdf[...,0].squeeze()
-    vertices, triangles = mc.marching_cubes(sdf.astype(float), level)
-    vertices /= sdf.shape[0]
-    vertices -= 0.5
+
+    #vertices, triangles, normals, values = measure.marching_cubes(sdf.astype(float).squeeze(), level)
+    vertices, triangles = mc.marching_cubes(sdf.astype(float).squeeze(), level)
+    vertices = vertices / sdf.shape[0] - 0.5
+    
     
     if export: 
         mc.export_obj(vertices, triangles, output_path)
         print(vertices.shape, sdf.shape) #could use rgb here, define and export a pointcloud
+    else:
+        vertices = torch.from_numpy(vertices.astype(np.float32)).squeeze().to('cuda:0')
+        vertices.requires_grad = True
+        triangles = torch.from_numpy(triangles.astype(np.int64)).squeeze().to('cuda:0')
+        #normals = torch.from_numpy(normals.astype(np.float32)).squeeze().to('cuda:0')
 
     return vertices, triangles
 
 def make_col_mesh(verts, faces, rgb, outpath):
+    if type(verts) is torch.Tensor: 
+        verts = verts.detach().cpu().numpy()
+        faces = faces.detach().cpu().numpy()
     if verts.size > 0:         
         #min max norm might not give authentic colors
         #rgb = ((rgb - rgb.min())/(rgb.max() - rgb.min())*255).astype(np.uint8)

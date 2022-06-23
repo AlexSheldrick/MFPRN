@@ -31,7 +31,7 @@ class ImplicitDataset(Dataset):
         self.splitsdir = splitsdir
         self.split_shapes = [x.strip() for x in (Path("../data/splits") / splitsdir / f"{split}.txt").read_text().split("\n") if x.strip() != ""]
         self.data = [x for x in self.split_shapes]
-        self.data = self.data * (400 if ('overfit' in splitsdir) and split == 'train' else 1)
+        #self.data = self.data * (400 if ('overfit' in splitsdir) and split == 'train' else 1)
         # feature extractor hparam, only batch relevant info
 
     def __len__(self):
@@ -43,8 +43,9 @@ class ImplicitDataset(Dataset):
 
         sample_idx = str(np.random.randint(0,30)*12).zfill(3)
         points, rgb, sdf = self.prepare_points(sample_folder)
-        surface_points, surface_rgb, surface_sdf = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = 500)
-
+        #surface_points, surface_rgb, surface_sdf = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = self.hparams.num_surface_points)
+        surface_points, _, _ = self.prepare_points(sample_folder, itemname='ptc_surface.npy', num_points = self.hparams.num_surface_points)
+        
         #load image and depth map
         image = pyexr.read(str(sample_folder / f'_r_{sample_idx}.exr'))
         image[...,:3] = image[...,:3]/3
@@ -136,7 +137,7 @@ class ImplicitDataset(Dataset):
             if self.hparams.num_surface_points > 0:
                 # using chibane surface-voxels (dense = 3k, sparse = 300)
                 # for surface reconstruction experiments, points are in canonic space            
-                xyz, rgbdots, _ = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = self.hparams.num_surface_points)
+                xyz, rgbdots, _ = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = 100000)
                 pts_grid = np.round((xyz + 0.5) * num_voxels).transpose(1,0)
         
             # get camera space to grid space transform  
@@ -190,10 +191,10 @@ class ImplicitDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1)
         camera = torch.from_numpy(camera)
         voxels = torch.from_numpy(voxels.astype(self.precision))
-        rgb = torch.cat((rgb, surface_rgb), dim=0)
-        sdf = torch.cat((sdf, surface_sdf), dim=0)
-        points = torch.cat((points, surface_points), dim=0)
-
+        #rgb = torch.cat((rgb, surface_rgb), dim=0)
+        #sdf = torch.cat((sdf, surface_sdf), dim=0)
+        #points = torch.cat((points, surface_points), dim=0)
+        mesh_path = str(sample_folder / item / 'disn_mesh.obj')
         #normalize RGB-Pointclouds to 0, 1
         #rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())         
         
@@ -209,21 +210,27 @@ class ImplicitDataset(Dataset):
             'image': image,
             'voxels': voxels,
             'sample_idx': sample_idx,
+            'surface_points': surface_points,
                     }
 
-    def prepare_points(self, sample_folder, itemname = "fixed_point_samples_blender.npz", num_points = None):
+    def prepare_points(self, sample_folder, itemname = "fixed_point_samples_blender3.npz", num_points = None):
         if num_points is None:
             num_points = self.hparams.num_points
 
         points, rgb, sdf = [], [], []
         
         sample_points = np.load(sample_folder / itemname)
+        if type(sample_points) is not np.ndarray:
+            subsample_indices = np.random.randint(0, sample_points['points'].shape[0], num_points)
 
-        subsample_indices = np.random.randint(0, sample_points['points'].shape[0], num_points)
-
-        points = sample_points['points'][subsample_indices]
-        rgb = sample_points['rgb'][subsample_indices]
-        sdf = sample_points[f'{self.hparams.fieldtype}'][subsample_indices]
+            points = sample_points['points'][subsample_indices]
+            rgb = sample_points['rgb'][subsample_indices]
+            sdf = sample_points[f'{self.hparams.fieldtype}'][subsample_indices]
+        else: #this is a hacky way to make it work for surface points, should have saved them as npz
+            subsample_indices = np.random.randint(0, sample_points.shape[0], num_points)
+            points = sample_points[subsample_indices]
+            rgb = np.arange(3)
+            sdf = np.arange(1)        
         
         points = torch.from_numpy(points.astype(self.precision)).reshape(-1,3)
         rgb = torch.from_numpy(rgb.astype(self.precision)).reshape(-1,3)

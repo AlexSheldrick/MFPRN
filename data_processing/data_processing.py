@@ -234,11 +234,30 @@ def fix_surface_points(path):
     rgb = pts_npz['rgb']
     
     sdf = mesh_to_sdf.mesh_to_sdf(car, points)
+    #_,sdf = compute_sdf_from_mesh
     occupancy = np.zeros_like(sdf)
     occupancy[sdf <= 0] = 1
     occupancy[sdf > 0] = 0
     
     np.savez(filename, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy)
+
+def fix_points(path):
+    #path = path.replace('disn_mesh.obj', '')
+    print(f'{datetime.datetime.now()}, reading {path}')
+    pts_npz = np.load(path+'/fixed_point_samples_blender.npz')
+    car = trimesh.load(path+'/disn_mesh.obj')    
+    filename_out = str(path +'/fixed_point_samples_blender2.npz')
+
+    points = pts_npz['points']
+    rgb = pts_npz['rgb']
+    
+    sdf = mesh_to_sdf.mesh_to_sdf(car, points)
+    #_,sdf = compute_sdf_from_mesh
+    occupancy = np.zeros_like(sdf)
+    occupancy[sdf <= 0] = 1
+    occupancy[sdf > 0] = 0
+    
+    np.savez(filename_out, points=points, rgb=rgb, sdf=sdf, occupancy=occupancy)
 
 def process_sample_rgb(inpath, outpath, num_points):  
     cc_path = cc_extract_colored_pc(inpath, outpath, num_points)
