@@ -152,7 +152,11 @@ dmypy.json
 .data/*/*/*/*/*/*/*/
 .data/*/*/*/*/*/*/*/*/
 
+.results/*/*
 .results/*
+.test/*
+.test
+.test/*/*
 .data_processing/old*/*
 .data_processing/stanford*/*
 *.png
