@@ -12,6 +12,7 @@ import trimesh
 
 from torch.nn.init import _calculate_correct_fan
 import numpy as np
+#from ConvNeXt.models.convnext import convnext_tiny
 
 
 args = arguments.parse_arguments()
@@ -104,7 +105,8 @@ class SimpleNetwork(LightningModule):
         # Linear: 
         # Input(N, *, H_in) - H_in: input features.
         # Output(N, *, H_out)
-        self.actvn = nn.ReLU()
+        #self.actvn = nn.ReLU()
+        self.actvn = nn.SiLU()
 
     def forward(self, batch):
         
@@ -206,46 +208,62 @@ class DeepSDFDecoder(LightningModule):
         #feature_size = 387
         self.lin1 = nn.Linear(feature_size, hidden_dim)
         self.lin2 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin3 = nn.Linear(feature_size + hidden_dim, hidden_dim)
-        self.lin4 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin3 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin4 = nn.Linear(feature_size + hidden_dim, hidden_dim)
         self.lin5 = nn.Linear(hidden_dim, hidden_dim)
-        self.lin6 = nn.Linear(hidden_dim + 1 + feature_size, hidden_dim) #concatenate SDF value of point here to output RGB
+        self.lin6 = nn.Linear(hidden_dim, hidden_dim)
+        #self.lin7 = nn.Linear(hidden_dim, hidden_dim)
+        self.lin_rgb_1 = nn.Linear(hidden_dim + 1 + feature_size, hidden_dim) #concatenate SDF value of point here to output RGB
         self.lin_sdf = nn.Linear(hidden_dim, 1)
-        self.lin_rgb = nn.Linear(hidden_dim, 3)
-        self.actvn = nn.ReLU()
+        self.lin_rgb_out = nn.Linear(hidden_dim, 3)
+        #self.actvn = nn.ReLU()
+        self.actvn = nn.SiLU()
         
-        lin_layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6]
+        lin_layers = [self.lin1, self.lin2, self.lin3, self.lin4, self.lin5, self.lin6, self.lin_rgb_1]
 
         for layer in lin_layers:
+            #sal_init(layer)
             init_weights_relu(layer)
+            #init_weights_symmetric(layer)
             layer = torch.nn.utils.weight_norm(layer)
+            
+        #init_weights_symmetric(self.lin_sdf)
+        #init_weights_relu(self.lin6)
+        #init_weights_symmetric(self.lin_rgb_out)
+        #self.lin6 = torch.nn.utils.weight_norm(self.lin_rgb_out)
 
-        for layer in [self.lin_sdf, self.lin_rgb ]:
-            init_weights_symmetric(layer)
+        #init_weights_relu(self.lin_sdf)
+        #sal_init_last_layer(self.lin_sdf)
+        #self.lin_sdf = torch.nn.utils.weight_norm(self.lin_sdf)
+
+        #init_weights_symmetric(self.lin_rgb)
+        #self.lin_rgb = torch.nn.utils.weight_norm(self.lin_rgb)
+
+        for layer in [self.lin_rgb_out, self.lin_sdf]:
+            #init_weights_symmetric(layer)
+            init_weights_relu(layer)
             layer = torch.nn.utils.weight_norm(layer)
 
 
     def forward(self, features):
         out = self.actvn(self.lin1(features))
         out = self.actvn(self.lin2(out))
-        out = torch.cat((out, features), axis=-1)        
         out = self.actvn(self.lin3(out))
+        out = torch.cat((out, features), axis=-1)        
         out = self.actvn(self.lin4(out))
         out = self.actvn(self.lin5(out))
-        sdf = self.lin_sdf(out)
+        out = self.actvn(self.lin6(out))
+        
         
         if self.hparams.fieldtype == 'sdf':
-            #sdf = nn.Tanh()(sdf)
-            sdf = nn.Tanh()(sdf) * (self.hparams.max_z - self.hparams.min_z)/2 + (self.hparams.max_z + self.hparams.min_z)/2
+            sdf = self.lin_sdf(out)
+            sdf = 0.5+nn.Tanh()(sdf)
 
         rgb = torch.cat((out, sdf, features), axis=-1)
-        rgb = self.actvn(self.lin6(rgb))
-
-        #rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1))        
-        #rgb = nn.Tanh()(self.lin_rgb(rgb).squeeze(-1)) * 0.5*(1.083 - 2.420e-05) + 0.5*2.420e-05
-        rgb = nn.Sigmoid()(self.lin_rgb(out).squeeze(-1)) #* (1.083 - 2.420e-05) + 2.420e-05
-
-        return sdf.squeeze(-1), rgb
+        rgb = self.actvn(self.lin_rgb_1(rgb))
+        rgb = self.lin_rgb_out(rgb)
+        rgb = 0.5+0.6*nn.Tanh()(rgb)
+        return sdf.squeeze(-1), rgb.squeeze(-1)
 
 class PixelAligned2D3DEncoder(LightningModule):
     def __init__(self, hparams):
@@ -427,7 +445,7 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
     def __init__(self, freeze_pretrained=None):
         super(PreTrainedFeatureExtractor2D_projective, self).__init__()
         model = 'resnet'
-        if model == 'restnest':
+        if model == 'resnest':
             print('model is resneSt')
             self.pretrained = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50_fast_2s1x64d', pretrained=True)
             #self.layers = torch.nn.Sequential(*(list(torch.hub.load('zhanghang1989/ResNeSt', 'resnest50_fast_2s1x64d', pretrained=True).children())[:-1]))
@@ -449,8 +467,31 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
             self.reduce_3 = torch.nn.Conv1d(512, 32, 1)
             self.reduce_4 = torch.nn.Conv1d(1024, 64, 1)
             self.reduce_5 = torch.nn.Conv1d(2048, 133, 1) #133, 64, 32, 16, 8
-            self.global_feat_out = torch.nn.Conv1d(2048, 256, 1)
-        else:
+            self.global_feat_out = torch.nn.Linear(2048, 256)
+        """if model == 'convnext':
+            print('model is convnext')
+            self.pretrained = convnext_tiny(pretrained=True)
+            
+            self.layer1 = model.downsample_layers[0] # 3,96
+            self.layer2 = model.downsample_layers[1] #96, 192
+            self.layer3 = model.downsample_layers[2] #192,384
+            self.layer4 = model.downsample_layers[3] #384,768
+            self.layer5 = torch.nn.Sequential(*(list(self.pretrained.children())[7:-1]))
+            #self.decoder1 = torch.nn.Linear(3+64+256+512+1024+2048, 256)        
+            layers = [self.layer1, self.layer2, self.layer3, self.layer4, self.layer5]
+            #target is 3+8+16+32+64+128 = 251
+            #5 extra conv1ds are needed
+            # reshape 
+            # In N,C,L // OUT N C L
+            # N, C, numpoints
+            self.reduce_1 = torch.nn.Conv1d(64, 8, 1)
+            self.reduce_2 = torch.nn.Conv1d(256, 16, 1)
+            self.reduce_3 = torch.nn.Conv1d(512, 32, 1)
+            self.reduce_4 = torch.nn.Conv1d(1024, 64, 1)
+            self.reduce_5 = torch.nn.Conv1d(2048, 133, 1) #133, 64, 32, 16, 8
+            self.global_feat_out = torch.nn.Linear(2048, 256)
+        """
+        if model == 'resnet':
             print('model is resnet50')
             self.pretrained = torch.hub.load('pytorch/vision:v0.10.0', 'resnet50', pretrained=False)            
             self.layer1 = torch.nn.Sequential(*(list(self.pretrained.children())[:4]))
@@ -481,7 +522,7 @@ class PreTrainedFeatureExtractor2D_projective(LightningModule):
         
         feat_layers = [self.reduce_1,  self.reduce_2,  self.reduce_3,  self.reduce_4,  self.reduce_5, self.global_feat_out]
         for layer in feat_layers:
-            init_weights_relu(layer)
+            init_weights_relu(layer, "relu")
             #layer = torch.nn.utils.weight_norm(layer)
 
         if freeze_pretrained:
@@ -850,9 +891,16 @@ def implicit_to_mesh(network, batch, resolution, embedding, threshold_p, output_
     value_grid = evaluate_network_on_grid(network, batch, resolution, embedding, res_increase)
     #limit to n verts?  
     vertices, faces = visualize_sdf(value_grid, output_path, level=threshold_p, rgb=True)
-    rgb = evaluate_network_rgb(network, batch, vertices ,embedding)
-    make_col_mesh(vertices, faces, rgb, output_path)
     #make mesh out of rgb, vertices, triangles
+    try:
+        rgb = evaluate_network_rgb(network, batch, vertices ,embedding)
+        make_col_mesh(vertices, faces, rgb, output_path)
+    except RuntimeError as R:
+        print(R)
+        print(vertices.shape, faces.shape)
+
+    
+    
 
 def implicit_to_verts_faces(network, batch, resolution, embedding, threshold_p, output_path, res_increase=args.inf_res, batch_idx=0):
     value_grid = evaluate_network_on_grid(network, batch, resolution, embedding, res_increase, batch_idx)
@@ -872,10 +920,10 @@ def implicit_rgb_only(network, batch, obj_path, output_path):
 def sal_init(m):
     if type(m) == nn.Linear:
         if hasattr(m, 'weight'):
-            std = np.sqrt(2) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_out'))
-
+            std = np.sqrt(2) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_in'))
             with torch.no_grad():
                 m.weight.normal_(0., std)
+                #torch.nn.init.normal_(m.weight, 0.0, np.sqrt(2) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_out')))
         if hasattr(m, 'bias'):
             m.bias.data.fill_(0.0)
 
@@ -884,14 +932,15 @@ def sal_init_last_layer(m):
     if type(m) == nn.Linear:
         if hasattr(m, 'weight'):
             with torch.no_grad():
-                torch.nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_in')), std=0.00001)
+                torch.nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_in')), std=0.0001)
+                #torch.nn.init.normal_(m.weight, mean=np.sqrt(np.pi) / np.sqrt(_calculate_correct_fan(m.weight, 'fan_out')), std=0.001)
         if hasattr(m, 'bias'):
-            m.bias.data.fill_(-0.1)
+            m.bias.data.fill_(-0.2)
 
 #Kaiming init ReLU & symmetric
-def init_weights_relu(m):
+def init_weights_relu(m, nonlinearity='leaky_relu'):
     if hasattr(m, 'weight'):
-        torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        torch.nn.init.kaiming_normal_(m.weight, nonlinearity=nonlinearity)
     if hasattr(m, 'bias'):
         m.bias.data.fill_(0.)
 

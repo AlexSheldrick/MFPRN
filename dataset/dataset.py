@@ -42,10 +42,11 @@ class ImplicitDataset(Dataset):
         sample_folder = Path(item)
 
         sample_idx = str(np.random.randint(0,30)*12).zfill(3)
-        points, rgb, sdf = self.prepare_points(sample_folder)
+        points, rgb, sdf = self.prepare_points(sample_folder, pad_with_normals=True, num_points=self.hparams.num_points)
         #surface_points, surface_rgb, surface_sdf = self.prepare_points(sample_folder, itemname='surface_points_blender.npz', num_points = self.hparams.num_surface_points)
-        surface_points, _, _ = self.prepare_points(sample_folder, itemname='ptc_surface.npy', num_points = self.hparams.num_surface_points)
+        #surface_points, _, _ = self.prepare_points(sample_folder, itemname='ptc_surface.npy', num_points = self.hparams.num_surface_points)
         
+
         #load image and depth map
         image = pyexr.read(str(sample_folder / f'_r_{sample_idx}.exr'))
         image[...,:3] = image[...,:3]/3
@@ -210,31 +211,53 @@ class ImplicitDataset(Dataset):
             'image': image,
             'voxels': voxels,
             'sample_idx': sample_idx,
-            'surface_points': surface_points,
+            #'surface_points': surface_points,
                     }
 
-    def prepare_points(self, sample_folder, itemname = "fixed_point_samples_blender3.npz", num_points = None):
+    def prepare_points(self, sample_folder, itemname = "fixed_point_samples_blender3.npz", num_points = None, pad_with_normals=False):
         if num_points is None:
             num_points = self.hparams.num_points
 
-        points, rgb, sdf = [], [], []
+        points, rgb, sdf, normals = [], [], [], []
         
         sample_points = np.load(sample_folder / itemname)
         if type(sample_points) is not np.ndarray:
+            if 'train' not in self.split: num_points *= 3
             subsample_indices = np.random.randint(0, sample_points['points'].shape[0], num_points)
 
             points = sample_points['points'][subsample_indices]
             rgb = sample_points['rgb'][subsample_indices]
             sdf = sample_points[f'{self.hparams.fieldtype}'][subsample_indices]
+            
+
         else: #this is a hacky way to make it work for surface points, should have saved them as npz
             subsample_indices = np.random.randint(0, sample_points.shape[0], num_points)
             points = sample_points[subsample_indices]
             rgb = np.arange(3)
-            sdf = np.arange(1)        
+            sdf = np.arange(1)     
+
+        """
+        if pad_with_normals and ('train' in self.split):       
+            #change original input too? points = point+epsilon
+            normals = sample_points['normals'][subsample_indices]    
+            normals = normals/(np.linalg.norm(normals,axis=1, keepdims=True))
+            displacements_n = np.random.uniform(low=0.5, high=0.9, size=(points.shape[0],1)) 
+            displacements_e = np.random.beta(a=2, b=2, size=(points.shape[0], 1))
+
+            points_n2 = points.copy() - displacements_n*((sdf[:,np.newaxis]))*normals
+            sdf_n2 = sdf.copy() - sdf.copy()*displacements_n.squeeze()
+
+            points = points - 0.1*displacements_e*((sdf[:,np.newaxis]))*normals
+            sdf = sdf - sdf*0.1*displacements_e.squeeze()
+
+            points = np.concatenate([points,points_n2], axis=0)
+            sdf = np.concatenate([sdf,sdf_n2])
+            rgb = np.concatenate([rgb,rgb], axis=0)
+        """
         
         points = torch.from_numpy(points.astype(self.precision)).reshape(-1,3)
         rgb = torch.from_numpy(rgb.astype(self.precision)).reshape(-1,3)
-        sdf = torch.from_numpy(sdf.astype(self.precision))   
+        sdf = torch.from_numpy(sdf.astype(self.precision))           
 
         return points, rgb, sdf
 

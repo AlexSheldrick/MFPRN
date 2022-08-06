@@ -2,6 +2,7 @@ from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.structures import Meshes
 from pytorch3d.io.obj_io import load_obj, load_objs_as_meshes
+from data_processing import copy_colors_nearest_neighbor
 import mesh_to_sdf
 import datetime
 import glob
@@ -55,18 +56,34 @@ def fix_sdf_with_normals(path):
     rgb = pts_npz['rgb']
     
     sdf, I, C, N = igl.signed_distance(points, mesh.vertices, mesh.faces, return_normals=True)
+    
+    #handle possible NANs
+    N = N/(np.linalg.norm(N,axis=1, keepdims=True))
+    rgb = rgb[~np.isnan(N).any(axis=1), :]
+    points = points[~np.isnan(N).any(axis=1), :]
+    sdf = sdf[~np.isnan(N).any(axis=1)]
+    N = N[~np.isnan(N).any(axis=1), :]
 
-    surf_pts = points - sdf.reshape(sdf.shape[0],1)*N/np.linalg.norm(N,axis=1).reshape(N.shape[0],1)
+    surf_pts = points - sdf[:,np.newaxis]*N
     surf_sdf, _, _ = igl.signed_distance(surf_pts, mesh.vertices, mesh.faces, return_normals=False)
+
+    surface_pc = np.load(str(path + '/surface_points_blender.npz'))    
+    surface_pc_rgb = surface_pc['rgb']
+    surface_pc_pts = surface_pc['points']
+
+    try:
+        surf_pts_rgb = copy_colors_nearest_neighbor(surface_pc_pts, surf_pts, surface_pc_rgb, k=5)
+    except ValueError as V:
+        print(V)
+        print(path)
     
-    
-    sdf = sdf[np.abs(surf_sdf) < 1e-4]
-    points = points[np.abs(surf_sdf) < 1e-4]
-    N = N[np.abs(surf_sdf) < 1e-4] 
-    rgb = rgb[np.abs(surf_sdf) < 1e-4]    
+    sdf = sdf[np.abs(surf_sdf) < 1e-3]
+    points = points[np.abs(surf_sdf) < 1e-3]
+    N = N[np.abs(surf_sdf) < 1e-3] 
+    rgb = surf_pts_rgb[np.abs(surf_sdf) < 1e-3]    
     
     #visualize if sdf & pseudo-normals were correct
-    #surf_pts = surf_pts[np.abs(surf_sdf) < 1e-4]      
+    #surf_pts = surf_pts[np.abs(surf_sdf) < 1e-3]      
     #visualize_rgb_pointcloud(np.concatenate([surf_pts, rgb], axis=1), 'test_surfpcloud.obj')
     
     np.savez(filename, points=points, rgb=rgb, sdf=sdf, normals=N)
@@ -110,7 +127,7 @@ if __name__ == '__main__':
     #offset = [i for i in range(3400,3500)]
     #render_blender('a','b')    
     #offset = [i for i in range(10)]
-    #offset = 2625
+    offset = 1000
     
     #names = sorted(glob.glob(str(f'{inpath}/car/*/disn_mesh.obj')))
     #names = [f.replace('/disn_mesh.obj', '') for f in names]

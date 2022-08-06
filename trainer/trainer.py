@@ -1,5 +1,6 @@
 from doctest import testfile
 from pyclbr import Function
+#from select import kevent
 import pytorch_lightning as pl
 import torch
 
@@ -84,7 +85,7 @@ class ImplicitTrainer(pl.LightningModule):
         
         #lr is decided by finder, aka the maximum
         num_steps = (self.splitlen // (self.hparams.batch_size))
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= num_steps, epochs=self.hparams.max_epoch)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(opt_g, max_lr=self.hparams.lr, steps_per_epoch= num_steps, epochs=self.hparams.max_epoch, div_factor=25.0, final_div_factor=1e3)
         
         sched = {
             'scheduler': scheduler,
@@ -124,17 +125,32 @@ class ImplicitTrainer(pl.LightningModule):
         opt.zero_grad()
         sdf, rgb, features = self.forward(batch) 
         
-        loss_backward = None
         sdf_loss = self.lossfunc(sdf, batch['sdf'])
-        loss = 0
         rgb_loss = torch.nn.functional.l1_loss(rgb, batch['rgb'])
-        loss = 10*sdf_loss + 0.5*rgb_loss
+        """
+        grad_normal = finite_differences_sdf(batch['points'], sdf, mode='forward')
+        #minimum penalty for nans, handle possible funky stuff
+        delete_loss = False
+        if torch.any(torch.isnan(grad_normal)):
+            delete_loss = True 
+            #grad_normal = grad_normal[~torch.any(grad_normal.isnan(),dim=2)]
+            grad_normal[torch.isnan(grad_normal)] = 1
+        #normal_loss = ((grad_normal - 1)**2).mean()
+        # try torch.abs(grad_normal - 1) instead
+        normal_loss = (torch.abs(grad_normal - 1)).mean()
+
+        self.log(f'train_{self.hparams.fieldtype}_grad_loss', normal_loss)        
+        if (self.current_epoch + 1 < 0) or delete_loss: normal_loss = 0
+        """
+        alpha =  min(self.current_epoch/1000, 0.01) 
+        loss = 10*sdf_loss + 0.5*rgb_loss #+ alpha*normal_loss
         self.manual_backward(loss)
 
-        #'''
+        '''
         #quote1        
-        if (self.current_epoch + 1 ) > 50 :
+        if (self.current_epoch + 1 ) > 600 :
             try:
+                loss_backward = None
                 #opt.zero_grad()
                 model = (self.encoder, self.decoder)        
                 v,f = zip(*[implicit_to_verts_faces(model, batch, (self.hparams.res, self.hparams.res, self.hparams.res), self.embedding,
@@ -191,8 +207,7 @@ class ImplicitTrainer(pl.LightningModule):
 
         #loss = chamfer_loss
         #quote2
-        #'''        
-
+        '''        
         self.log(f'train_{self.hparams.fieldtype}_loss', sdf_loss)
         self.log(f'train_rgb_loss', rgb_loss)        
         self.log(f'train_loss', loss)
@@ -227,9 +242,19 @@ class ImplicitTrainer(pl.LightningModule):
         loss = 0        
         sdf_loss = self.lossfunc(sdf, batch['sdf'])
         rgb_loss = torch.nn.functional.l1_loss(rgb, batch['rgb'])
-                
-        if self.hparams.fieldtype == 'sdf': loss = loss + 10*sdf_loss + 0.5*rgb_loss
-        else: loss = loss + sdf_loss + 0.5*rgb_loss 
+        """if ('test' not in mode):
+            grad_normal = finite_differences_sdf(batch['points'], sdf, mode='forward')
+            #zero penalty for nans, handle possible funky stuff
+            grad_normal[torch.isnan(grad_normal)] = 1
+            normal_loss = ((grad_normal - 1)**2).mean()      
+            
+                    
+            #if self.hparams.fieldtype == 'sdf': loss = loss + 10*sdf_loss + 0.5*rgb_loss
+            #else: loss = loss + sdf_loss + 0.5*rgb_loss 
+
+            self.log(f'{mode}_{self.hparams.fieldtype}_grad_loss', normal_loss)
+            """
+        loss = 10*sdf_loss + 0.5*rgb_loss #+ 0.01*normal_loss
 
         self.log(f'{mode}_{self.hparams.fieldtype}_loss', sdf_loss)
         self.log(f'{mode}_rgb_loss', rgb_loss)        
@@ -344,6 +369,30 @@ def determine_implicit_surface(model, batch, mode = 'central', epsilon = 1e-4): 
     
     return sdf, rgb, sdf_surface, rgb_surface, sdf_grad, surface_points
 
+def finite_differences_sdf(points, sdf, mode):
+
+    if 'forward' in mode:
+        #structure is points(0:num_points --> f(x-e), num_points:2*num_points --> x_shifted points etc., ..., 4num_points: --> base points)
+        assert points.shape[1] % 2 == 0, 'central difference gradient points not divisible by 2 --> 2-stencil input required'
+        num_points = points.shape[1] // 2
+        point_diff = points[...,:num_points,:] - points[...,num_points:2*num_points,:]
+        point_diff_norm =torch.sqrt((point_diff).pow(2).sum(2)).unsqueeze(2)
+        #point_diff_norm = torch.linalg.vector_norm(point_diff, dim=2, keepdim=True) 
+        #displacements = 1/(point_diff_norm)
+        #if torch.any(torch.isnan(displacements)): print('nans in displacements')
+        grad_n = (torch.abs(sdf[...,:num_points].unsqueeze(2)) - torch.abs(sdf[...,num_points:2*num_points].unsqueeze(2))) / point_diff_norm
+    
+    if 'central' in mode:
+        #structure is points(0:num_points --> f(x-e), num_points:2*num_points --> x_shifted points etc., ..., 4num_points: --> base points)
+        assert points.shape[1] % 3 == 0, 'central difference gradient points not divisible by 3 --> 3-stencil input required'
+        num_points = points.shape[1] // 3
+        point_diff = (points[...,:num_points,:] - points[...,num_points:2*num_points,:])
+        displacements = torch.linalg.vector_norm(point_diff, dim=2) 
+        if torch.any(torch.isnan(displacements)): print('nans in displacements')
+        grad_n = ((sdf[...,:num_points].unsqueeze(2)) - (sdf[...,2*num_points:3*num_points].unsqueeze(2))) / (displacements) * torch.sign(sdf[...,:num_points].unsqueeze(2))
+
+    return grad_n
+
 def finite_differences_gradient(points, epsilon, mode):
 
     if 'forward' in mode:
@@ -424,9 +473,10 @@ def train_scene_net(args):
 
     elif (args.test is not None) and (args.resume is None):
         model = ImplicitTrainer.load_from_checkpoint(args.test, strict = False)
-        model.hparams.num_points *= 2*model.hparams.batch_size
+        model.hparams.num_points *= model.hparams.batch_size
         model.hparams.batch_size = 1
         model.hparams.res = 256
+        #model.hparams.experiment = model.hparams.experiment.replace('sdf', 'test/sdf')
         model.hparams.splitsdir = args.splitsdir
         model.hparams.test = args.test
         print(model.hparams.splitsdir)

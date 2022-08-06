@@ -23,7 +23,7 @@ def parse_arguments():
     parser.add_argument('--datasetdir', type=str, help='datasetdir', default='../data')
     parser.add_argument('--val_check_percent', type=float, default=1.0, help='percentage of val checked')
     parser.add_argument('--val_check_interval', type=float, default=1.0, help='check val every fraction of epoch')
-    parser.add_argument('--max_epoch', type=int, default=20, help='number of epochs to train for')
+    parser.add_argument('--max_epoch', type=int, default=120, help='number of epochs to train for')
     parser.add_argument('--save_epoch', type=int, default=1, help='save every nth epoch')
     parser.add_argument('--lr', type=float, default=2e-3, help='learning rate')
     parser.add_argument('--lr_decay', type=float, default=1e-4, help='learning rate decay')
@@ -38,7 +38,7 @@ def parse_arguments():
     parser.add_argument('--clamp', type=float, default=2, help='truncate sdf to certain value or convert to occupancy field')
     
     parser.add_argument('--encoder', type=str, default='hybrid_depthproject', help='type of encoder')    #conv2d_pretrained_projective #hybrid_depthproject #hybrid_surface
-    parser.add_argument('--num_points', type=int, default=4000)
+    parser.add_argument('--num_points', type=int, default=2000)
     parser.add_argument('--num_surface_points', type=int, default=2000)
     
     parser.add_argument("--coordinate_embedding_size", nargs='+', type=int, default=[256, 0], help='ndims for fourier embedding') #256 0 ##best 256
