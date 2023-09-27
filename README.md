@@ -9,7 +9,7 @@ In this work we train a 3D CNN to predict colored meshes from single view inputs
 
 # 3D Pointcloud reconstruction with image
 
-The network can also use an additional pointcloud as input (a) together with camera parameters and an image (b) to predict an improved fully colored 3D mesh which we can re-render from arbitrary views (c).
+The network can also use an additional pointcloud as input (a) together with camera parameters and an image. (b) Is a re-render from identical viewpoint, but the improved & fully colored 3D mesh can be re-rendered from arbitrary views (c).
 
 ![results](Pointcloud-Reconstruction.png)
 
