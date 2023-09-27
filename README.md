@@ -3,7 +3,7 @@ monocular feature projection & object reconstruction network
 
 # 3D Reconstruction from a Single RGB Image
 
-In this work we train a 3D CNN to predict colored meshes from single view inputs (1 image). The output takes as input camera parameters and an image (a) and predicts a fully colored 3D mesh (c), which we can re-render from the input view to validate our prediction (b). See [full report](https://github.com/AlexSheldrick/MFPRN/blob/main/GR_Alex-Sheldrick_3D-Reconstruction.pdf) for more information.
+In this work we train a 3D CNN to predict colored meshes from single view inputs (1 image). The network takes as input: 1. camera parameters and 2. an image (a) to predict a fully colored 3D mesh (c), which we can re-render from the input view to validate our prediction (b). See [full report](https://github.com/AlexSheldrick/MFPRN/blob/main/GR_Alex-Sheldrick_3D-Reconstruction.pdf) for more information.
 
 ![results](https://github.com/AlexSheldrick/MFPRN/blob/bf42a747546ff601adb43910ef13ca727e2da2a6/SingleView%20results.png)
 
